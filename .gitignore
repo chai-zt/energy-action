@@ -1,0 +1,65 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+
+# Vite cache
+.vite/
+
+# Environment
+.env
+.env.*
+!.env.example
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Test
+coverage/
+test-results/
+
+# Playwright
+playwright-report/
+blob-report/
+
+# Backend data
+.data/
+server/.data/
+
+# SQLite database files
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+
+# Server verification data
+server/.verification-data/
+server/.browser-verification-data/
+server/.debug-*
+
+# Logs
+*.log
+npm-debug.log*
+
+# Temp / backup / safe-delete artifacts
+*.tmp
+*.temp
+*.bak
+*.backup
+*.old
+*.DELETE.*
+
+# WorkBuddy private state
+.workbuddy/
+
+# Vite timestamps
+vite.config.ts.timestamp-*.mjs
