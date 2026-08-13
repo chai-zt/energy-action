@@ -6,6 +6,11 @@
 import { createServer } from 'node:http'
 import { atomicWriteAll, purgeExpiredRecycleBin, readDecompositions, readMinActions, readProjects, readTasks } from './dataStore.ts'
 import { decomposeTask } from './services/decomposeService.ts'
+import { handleAiConfigRequest } from './ai/configApi.ts'
+import { getAiAvailability } from './ai/availability.ts'
+import { buildProviderFromConfig } from './ai/providers/providerFactory.ts'
+import { setResolvedProvider, hasExplicitProvider, AiError } from './ai/providers/mimoProvider.ts'
+import { decomposeLimiter } from './security/rateLimit.ts'
 import type { Task } from '../src/domain/models.ts'
 
 const PORT = parseInt(process.env.PORT || '4001', 10)
@@ -23,21 +28,33 @@ function writeProjects(projects: ReturnType<typeof readProjects>) {
 
 // ponytail: 文件读写够用, 升级路径: 替换为 pg pool
 
-// === CORS ===
+// === CORS（仅本地前端 origin，不回显 *）===
 function corsHeaders() {
   return {
-    'Access-Control-Allow-Origin': '*',
+    'Access-Control-Allow-Origin': 'http://localhost:3000',
     'Access-Control-Allow-Methods': 'GET, POST, PATCH, DELETE, OPTIONS',
-    'Access-Control-Allow-Headers': 'Content-Type',
+    'Access-Control-Allow-Headers': 'Content-Type, X-Energy-Action-Session',
   }
 }
 
-// === 请求体解析 ===
-function parseBody(req: any): Promise<any> {
+// === 请求体解析（累计 byte 上限，防止无界读取）===
+const MAX_TASK_BODY_BYTES = 1024 * 1024 // 1 MB（通用任务/项目 body）
+function parseBody(req: any, maxBytes = MAX_TASK_BODY_BYTES): Promise<any> {
   return new Promise((resolve, reject) => {
-    let body = ''
-    req.on('data', (chunk: string) => { body += chunk })
+    let size = 0
+    const chunks: Buffer[] = []
+    req.on('data', (chunk: Buffer) => {
+      size += chunk.length
+      if (size > maxBytes) {
+        reject(new Error('BODY_TOO_LARGE'))
+        req.destroy()
+        return
+      }
+      chunks.push(chunk)
+    })
     req.on('end', () => {
+      if (size > maxBytes) { reject(new Error('BODY_TOO_LARGE')); return }
+      const body = Buffer.concat(chunks).toString('utf-8')
       try { resolve(body ? JSON.parse(body) : {}) }
       catch { reject(new Error('Invalid JSON')) }
     })
@@ -72,6 +89,9 @@ function getRecycledRoots(tasks: Task[]): Task[] {
 async function handleRequest(req: any, res: any): Promise<void> {
   const url = new URL(req.url, `http://localhost:${PORT}`)
   const headers = { 'Content-Type': 'application/json', ...corsHeaders() }
+
+  // === /ai/* 模型配置中心（含敏感 API 守卫 / session / SSRF）===
+  if (await handleAiConfigRequest(req, res, PORT)) return
 
   // CORS preflight
   if (req.method === 'OPTIONS') {
@@ -432,13 +452,41 @@ async function handleRequest(req: any, res: any): Promise<void> {
   // === POST /tasks/:taskId/decompose ===
   const decomposeMatch = url.pathname.match(/^\/tasks\/(.+)\/decompose$/)
   if (req.method === 'POST' && decomposeMatch) {
+    // 限流（10/min）
+    if (!decomposeLimiter.allow('decompose')) {
+      res.writeHead(429, headers)
+      res.end(JSON.stringify({ error: 'RATE_LIMITED' }))
+      return
+    }
+    // 非测试注入场景：AI 可用性检查 + 从本地 Config/Secret 解析 Provider
+    if (!hasExplicitProvider()) {
+      const availability = await getAiAvailability()
+      if (!availability.available) {
+        res.writeHead(503, headers)
+        res.end(JSON.stringify({ error: 'AI_UNAVAILABLE', reason: availability.reason }))
+        return
+      }
+      const provider = await buildProviderFromConfig()
+      if (!provider) {
+        res.writeHead(503, headers)
+        res.end(JSON.stringify({ error: 'AI_UNAVAILABLE', reason: 'no_secret' }))
+        return
+      }
+      setResolvedProvider(provider)
+    }
+
     try {
       const data = await decomposeTask(decomposeMatch[1])
       res.writeHead(200, headers)
       res.end(JSON.stringify(data))
     } catch (err: any) {
+      // 认证失败（401/403）→ 立即 verified=false
+      if (err instanceof AiError && (err.status === 401 || err.status === 403)) {
+        const { updateVerificationStatus } = await import('./ai/providerConfig.ts')
+        updateVerificationStatus('failed')
+      }
       // 区分：404 任务不存在 / 422 AI输出非法 / 502 AI服务不可用
-      if (err.message.includes('not found')) {
+      if (err.message?.includes('not found')) {
         res.writeHead(404, headers)
         res.end(JSON.stringify({ error: 'TASK_NOT_FOUND', detail: err.message }))
       } else if (err.name === 'ValidationError') {
@@ -465,7 +513,8 @@ export { handleRequest }
 
 if (!process.env.PERSONAL_AI_OS_TEST) {
   const server = createServer(handleRequest)
-  server.listen(PORT, () => {
-    console.log(`[Backend] Personal AI OS API running on http://localhost:${PORT}`)
+  // P0 安全：只绑定 loopback，禁止 0.0.0.0 / LAN 暴露
+  server.listen(PORT, '127.0.0.1', () => {
+    console.log(`[Backend] Energy Action API running on http://127.0.0.1:${PORT}`)
   })
 }

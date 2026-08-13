@@ -119,6 +119,20 @@ export class MiMoProvider implements AiJsonProvider {
 }
 
 let provider: AiJsonProvider = new MiMoProvider()
+let explicitProvider = false
 
-export function setProvider(p: AiJsonProvider): void { provider = p }
+/** 测试接缝：注入 fake provider（标记为「显式注入」，路由跳过可用性检查）。 */
+export function setProvider(p: AiJsonProvider): void {
+  provider = p
+  explicitProvider = true
+}
+
 export function getProvider(): AiJsonProvider { return provider }
+
+/** 是否已显式注入 provider（测试场景）。 */
+export function hasExplicitProvider(): boolean { return explicitProvider }
+
+/** 路由从本地 Config + Secret 解析 provider（不标记为显式注入）。 */
+export function setResolvedProvider(p: AiJsonProvider): void {
+  provider = p
+}

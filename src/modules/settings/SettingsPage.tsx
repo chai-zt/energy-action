@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react'
-import { Settings, Download, Upload, Trash2, FileSpreadsheet } from 'lucide-react'
+import { Settings, Download, Upload, Trash2, FileSpreadsheet, Sparkles } from 'lucide-react'
 import { DexieExportRepository, DexieTaskRepository } from '@/storage/repositories'
+import { AiModelConfigForm } from '@/components/AiModelConfigForm'
 import type { ExportData } from '@/domain/models'
 
 export function SettingsPage() {
@@ -102,6 +103,18 @@ export function SettingsPage() {
           {message}
         </div>
       )}
+
+      {/* AI 模型 */}
+      <div className="card">
+        <h2 className="font-semibold text-slate-800 mb-3 flex items-center gap-2">
+          <Sparkles size={16} className="text-blue-500" />
+          AI 模型
+        </h2>
+        <p className="text-xs text-slate-500 mb-3">
+          配置模型服务后，「大任务」可自动 AI 拆解为可执行小任务并生成最小行动。API Key 只保存在本机系统安全凭据库，不会上传。
+        </p>
+        <AiModelConfigForm />
+      </div>
 
       {/* 数据管理 */}
       <div className="card">

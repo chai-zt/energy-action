@@ -121,6 +121,18 @@ function initSchema(d: Database.Database): void {
       created_at       TEXT NOT NULL
     );
 
+    CREATE TABLE IF NOT EXISTS ai_provider_configs (
+      id                  TEXT PRIMARY KEY,
+      provider_type       TEXT NOT NULL,
+      provider_name       TEXT NOT NULL DEFAULT '',
+      credential_type     TEXT NOT NULL DEFAULT 'pay_as_you_go',
+      base_url            TEXT NOT NULL DEFAULT '',
+      model               TEXT NOT NULL DEFAULT '',
+      verification_status TEXT NOT NULL DEFAULT 'unverified',
+      last_verified_at    TEXT,
+      updated_at          TEXT NOT NULL
+    );
+
     CREATE TABLE IF NOT EXISTS projects (
       id            TEXT PRIMARY KEY,
       name          TEXT NOT NULL,

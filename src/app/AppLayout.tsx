@@ -6,6 +6,7 @@ import {
 } from 'lucide-react'
 import { useState, useEffect } from 'react'
 import { AIAssistantFab } from '@/components/AIAssistantFab'
+import { AiStatusEntry } from '@/components/AiStatusEntry'
 
 const desktopNav = [
   { path: '/today', label: '首页', icon: LayoutDashboard },
@@ -78,12 +79,15 @@ export function AppLayout() {
         {isMobile && (
           <header className="sticky top-0 z-20 bg-white border-b border-slate-200 h-14 flex items-center justify-between px-4">
             <span className="font-bold text-lg text-slate-800">Personal AI OS</span>
-            <button
-              onClick={() => setMobileMenuOpen(!mobileMenuOpen)}
-              className="p-2 rounded-lg hover:bg-slate-100 touch-target"
-            >
-              {mobileMenuOpen ? <X size={20} /> : <Menu size={20} />}
-            </button>
+            <div className="flex items-center gap-2">
+              <AiStatusEntry />
+              <button
+                onClick={() => setMobileMenuOpen(!mobileMenuOpen)}
+                className="p-2 rounded-lg hover:bg-slate-100 touch-target"
+              >
+                {mobileMenuOpen ? <X size={20} /> : <Menu size={20} />}
+              </button>
+            </div>
           </header>
         )}
 
@@ -143,6 +147,13 @@ export function AppLayout() {
             )
           })}
         </nav>
+      )}
+
+      {/* 全局 AI 状态入口（桌面右上角） */}
+      {!isMobile && (
+        <div className="fixed top-3 right-4 z-40">
+          <AiStatusEntry />
+        </div>
       )}
 
       {/* 全局 AI 助手浮动入口 */}

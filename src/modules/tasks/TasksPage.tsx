@@ -23,6 +23,8 @@ import { shouldExecuteOnDate } from '@/services/recurrenceEngine'
 import { getEnergyCost, calcPlannedEnergy } from '@/services/energyService'
 import { createTask as apiCreateTask, decomposeTask as apiDecomposeTask, getChildTasks as apiGetChildTasks, getMinimumAction as apiGetMinimumAction, getRecycledTasks as apiGetRecycledTasks, moveTask as apiMoveTask, restoreTask as apiRestoreTask, softDeleteTask as apiSoftDeleteTask, updateMinAction as apiUpdateMinAction, type RecycledTask } from '@/services/apiClient'
 import { DexieExecutionStepRepository, DexieMinimumActionRepository } from '@/storage/repositories'
+import { getAiStatus } from '@/services/aiConfigApi'
+import { AiModelConfigForm } from '@/components/AiModelConfigForm'
 import type {
   Task, Tag, CognitiveLoad, DailyState, DailyReview,
   TimeRecord, PomodoroSession, CompletionRecord, TaskStatus, EnergyDemand,
@@ -63,6 +65,8 @@ export function TasksPage() {
   const [activeTaskId, setActiveTaskId] = useState<string | null>(null)
   const [undoInfo, setUndoInfo] = useState<{ taskId: string; oldDate: string | null } | null>(null)
   const [toast, setToast] = useState('')
+  const [aiAvailable, setAiAvailable] = useState<boolean>(false)
+  const [configPromptOpen, setConfigPromptOpen] = useState(false)
 
   // 右侧日历状态 — 每次进入页面初始化为今天
   const [selectedDate, setSelectedDate] = useState<string>(today())
@@ -140,7 +144,23 @@ export function TasksPage() {
     await loadTaskNode(taskId)
   }
 
+  const refreshAiStatus = useCallback(async () => {
+    try {
+      const status = await getAiStatus()
+      setAiAvailable(status.available)
+    } catch {
+      setAiAvailable(false) // 后端不可用 → fail-closed
+    }
+  }, [])
+
+  useEffect(() => { void refreshAiStatus() }, [refreshAiStatus])
+
   const startDecomposition = async (taskId: string) => {
+    // AI 不可用 → 不调用 Provider / 不发网络请求，统一打开配置提示
+    if (!aiAvailable) {
+      setConfigPromptOpen(true)
+      return
+    }
     setDecompState(previous => ({ ...previous, [taskId]: 'generating' }))
     try {
       await apiDecomposeTask(taskId)
@@ -636,11 +656,11 @@ export function TasksPage() {
               ) : (
                 <div className="space-y-4 max-h-[calc(100vh-22rem)] overflow-y-auto">
                   <TaskSection title={view === 'all' ? '大任务' : '任务'} tasks={view === 'all' ? largeTasks : leftTasks}>
-                      {task => <TaskRow key={task.id} task={task} onToggle={() => handleToggleStatus(task)} onDelete={() => requestDelete(task)} onEdit={() => setEditingTask(task)} onExpand={() => toggleExpand(task.id)} isExpanded={expandedTaskIds.includes(task.id)} isLarge={isLargeTask(task)} decompState={decompState[task.id]} childTasks={childTasks} minimumActions={minimumActions} legacySteps={legacyStepsByTask[task.id] || []} expandedTaskIds={expandedTaskIds} allDecompState={decompState} editingMA={editingMA} hasChildren={hasChildren} isLargeTask={isLargeTask} onToggleExpand={toggleExpand} onEditMinimumAction={setEditingMA} onSaveMinimumAction={handleMinActionSave} onCancelMinimumAction={() => setEditingMA(null)} onToggleStep={toggleStep} onEditTask={setEditingTask} onRequestDelete={requestDelete} onMoveTask={moveTask} />}
+                      {task => <TaskRow key={task.id} task={task} onToggle={() => handleToggleStatus(task)} onDelete={() => requestDelete(task)} onEdit={() => setEditingTask(task)} onExpand={() => toggleExpand(task.id)} isExpanded={expandedTaskIds.includes(task.id)} isLarge={isLargeTask(task)} decompState={decompState[task.id]} childTasks={childTasks} minimumActions={minimumActions} legacySteps={legacyStepsByTask[task.id] || []} expandedTaskIds={expandedTaskIds} allDecompState={decompState} editingMA={editingMA} hasChildren={hasChildren} isLargeTask={isLargeTask} onToggleExpand={toggleExpand} onEditMinimumAction={setEditingMA} onSaveMinimumAction={handleMinActionSave} onCancelMinimumAction={() => setEditingMA(null)} onToggleStep={toggleStep} onEditTask={setEditingTask} onRequestDelete={requestDelete} onMoveTask={moveTask} onStartDecomposition={startDecomposition} />}
                   </TaskSection>
                   {view === 'all' && (
                     <TaskSection title="小任务与习惯" tasks={smallAndHabitTasks}>
-                      {task => <TaskRow key={task.id} task={task} onToggle={() => handleToggleStatus(task)} onDelete={() => requestDelete(task)} onEdit={() => setEditingTask(task)} onExpand={() => toggleExpand(task.id)} isExpanded={expandedTaskIds.includes(task.id)} isLarge={false} decompState={decompState[task.id]} childTasks={childTasks} minimumActions={minimumActions} legacySteps={legacyStepsByTask[task.id] || []} expandedTaskIds={expandedTaskIds} allDecompState={decompState} editingMA={editingMA} hasChildren={hasChildren} isLargeTask={isLargeTask} onToggleExpand={toggleExpand} onEditMinimumAction={setEditingMA} onSaveMinimumAction={handleMinActionSave} onCancelMinimumAction={() => setEditingMA(null)} onToggleStep={toggleStep} onEditTask={setEditingTask} onRequestDelete={requestDelete} onMoveTask={moveTask} />}
+                      {task => <TaskRow key={task.id} task={task} onToggle={() => handleToggleStatus(task)} onDelete={() => requestDelete(task)} onEdit={() => setEditingTask(task)} onExpand={() => toggleExpand(task.id)} isExpanded={expandedTaskIds.includes(task.id)} isLarge={false} decompState={decompState[task.id]} childTasks={childTasks} minimumActions={minimumActions} legacySteps={legacyStepsByTask[task.id] || []} expandedTaskIds={expandedTaskIds} allDecompState={decompState} editingMA={editingMA} hasChildren={hasChildren} isLargeTask={isLargeTask} onToggleExpand={toggleExpand} onEditMinimumAction={setEditingMA} onSaveMinimumAction={handleMinActionSave} onCancelMinimumAction={() => setEditingMA(null)} onToggleStep={toggleStep} onEditTask={setEditingTask} onRequestDelete={requestDelete} onMoveTask={moveTask} onStartDecomposition={startDecomposition} />}
                     </TaskSection>
                   )}
                 </div>
@@ -965,6 +985,20 @@ export function TasksPage() {
           }}
         />
       )}
+
+      {/* AI 未配置提示（统一复用 AiModelConfigForm） */}
+      {configPromptOpen && (
+        <div className="fixed inset-0 bg-black/30 flex items-center justify-center z-50 p-4" onClick={() => setConfigPromptOpen(false)}>
+          <div className="bg-white rounded-xl p-6 max-w-md w-full max-h-[85vh] overflow-y-auto shadow-xl" onClick={e => e.stopPropagation()}>
+            <h3 className="font-semibold text-slate-800">请先配置模型 API</h3>
+            <p className="mt-1 text-sm text-slate-500 mb-4">使用 AI 拆解前，需要先配置模型服务。API Key 只保存在本机系统安全凭据库。</p>
+            <AiModelConfigForm onChanged={refreshAiStatus} compact />
+            <div className="flex justify-end mt-4">
+              <button type="button" onClick={() => setConfigPromptOpen(false)} className="btn-secondary">关闭</button>
+            </div>
+          </div>
+        </div>
+      )}
     </DndContext>
   )
 }
@@ -1053,6 +1087,7 @@ interface TaskRowProps {
   onEditTask: (task: Task) => void
   onRequestDelete: (task: Task) => void
   onMoveTask: (task: Task, direction: 'up' | 'down') => void
+  onStartDecomposition: (taskId: string) => void
 }
 
 function TaskSection({ title, tasks, children }: { title: string; tasks: Task[]; children: (task: Task) => React.ReactNode }) {
@@ -1063,10 +1098,10 @@ function TaskSection({ title, tasks, children }: { title: string; tasks: Task[];
 }
 
 function TaskRow(props: TaskRowProps) {
-  const { task, onToggle, onDelete, onEdit, onExpand, isExpanded, isLarge, decompState, childTasks, minimumActions, legacySteps, expandedTaskIds, allDecompState, editingMA, hasChildren, isLargeTask, onToggleExpand, onEditMinimumAction, onSaveMinimumAction, onCancelMinimumAction, onToggleStep, onEditTask, onRequestDelete, onMoveTask } = props
+  const { task, onToggle, onDelete, onEdit, onExpand, isExpanded, isLarge, decompState, childTasks, minimumActions, legacySteps, expandedTaskIds, allDecompState, editingMA, hasChildren, isLargeTask, onToggleExpand, onEditMinimumAction, onSaveMinimumAction, onCancelMinimumAction, onToggleStep, onEditTask, onRequestDelete, onMoveTask, onStartDecomposition } = props
   return <div>
     <DraggableTask task={task} onToggle={onToggle} onDelete={onDelete} onClick={onEdit} onExpand={onExpand} isExpanded={isExpanded} isLarge={isLarge} decompState={decompState} />
-    {isExpanded && <TaskTreeDetails task={task} childTasks={childTasks} minimumActions={minimumActions} legacySteps={legacySteps} expandedTaskIds={expandedTaskIds} decompState={allDecompState} editingMA={editingMA} hasChildren={hasChildren} isLargeTask={isLargeTask} onToggleExpand={onToggleExpand} onEditMinimumAction={onEditMinimumAction} onSaveMinimumAction={onSaveMinimumAction} onCancelMinimumAction={onCancelMinimumAction} onToggleStep={onToggleStep} onEditTask={onEditTask} onRequestDelete={onRequestDelete} onMoveTask={onMoveTask} />}
+    {isExpanded && <TaskTreeDetails task={task} childTasks={childTasks} minimumActions={minimumActions} legacySteps={legacySteps} expandedTaskIds={expandedTaskIds} decompState={allDecompState} editingMA={editingMA} hasChildren={hasChildren} isLargeTask={isLargeTask} onToggleExpand={onToggleExpand} onEditMinimumAction={onEditMinimumAction} onSaveMinimumAction={onSaveMinimumAction} onCancelMinimumAction={onCancelMinimumAction} onToggleStep={onToggleStep} onEditTask={onEditTask} onRequestDelete={onRequestDelete} onMoveTask={onMoveTask} onStartDecomposition={onStartDecomposition} />}
   </div>
 }
 
@@ -1225,17 +1260,21 @@ interface TaskTreeDetailsProps {
   onEditTask: (task: Task) => void
   onRequestDelete: (task: Task) => void
   onMoveTask: (task: Task, direction: 'up' | 'down') => void
+  onStartDecomposition: (taskId: string) => void
 }
 
 function TaskTreeDetails({
   task, childTasks, minimumActions, legacySteps, expandedTaskIds, decompState, editingMA,
   hasChildren, isLargeTask, onToggleExpand, onEditMinimumAction,
   onSaveMinimumAction, onCancelMinimumAction, onToggleStep, onEditTask, onRequestDelete, onMoveTask,
+  onStartDecomposition,
 }: TaskTreeDetailsProps) {
   const children = childTasks[task.id] || []
   const minAction = minimumActions[task.id]
   const taskState = decompState[task.id]
   const isLarge = isLargeTask(task)
+
+  const showDecomposeButton = isLarge && !hasChildren(task.id) && taskState !== 'generating'
 
   return (
     <div className="mt-1 ml-6 p-2.5 bg-gradient-to-br from-blue-50/60 to-white rounded-lg border border-blue-100/50 space-y-2 text-xs">
@@ -1246,6 +1285,17 @@ function TaskTreeDetails({
         <div className="text-red-500 space-y-1">
           <p className="text-[10px]">AI 拆解失败，任务已保留，可手动添加小任务。</p>
         </div>
+      )}
+
+      {/* AI 拆解入口（大任务无拆解结果时） */}
+      {showDecomposeButton && (
+        <button
+          type="button"
+          onClick={() => onStartDecomposition(task.id)}
+          className="flex items-center gap-1 px-2 py-1 rounded bg-violet-50 text-violet-600 hover:bg-violet-100 text-[10px] font-medium transition-colors"
+        >
+          <ListTree size={10} /> AI 拆解
+        </button>
       )}
 
       {!isLarge && minAction && (
@@ -1296,6 +1346,7 @@ function TaskTreeDetails({
               onEditTask={onEditTask}
               onRequestDelete={onRequestDelete}
               onMoveTask={onMoveTask}
+              onStartDecomposition={onStartDecomposition}
               canMoveUp={index > 0}
               canMoveDown={index < children.length - 1}
             />
