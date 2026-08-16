@@ -70,6 +70,7 @@ export interface ScheduleRepository {
 
 // --- Completion ---
 export interface CompletionRepository {
+  getAll(): Promise<CompletionRecord[]>
   getByTaskId(taskId: UUID): Promise<CompletionRecord[]>
   getByDate(date: ISODate): Promise<CompletionRecord[]>
   getByDateRange(start: ISODate, end: ISODate): Promise<CompletionRecord[]>

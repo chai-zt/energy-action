@@ -28,15 +28,9 @@ import { assertSafeRemoteUrl, SsrfError } from '../security/ssrf.ts'
 import { securityFuse } from '../security/fuse.ts'
 import { configTestLimiter } from '../security/rateLimit.ts'
 import { getSessionToken, isSessionValid, getSessionHeaderName } from '../security/session.ts'
+import { corsOrigin, isAllowedOrigin, isHostedRuntime } from '../runtime.ts'
 
 const MAX_BODY_BYTES = 16 * 1024
-const ALLOWED_ORIGINS = new Set([
-  'http://localhost:3000',
-  'http://127.0.0.1:3000',
-  'http://localhost:4001',
-  'http://127.0.0.1:4001',
-])
-
 // === Guard helpers ===
 
 function isLoopback(req: IncomingMessage): boolean {
@@ -51,16 +45,15 @@ function isAllowedHost(req: IncomingMessage): boolean {
   return hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '::1'
 }
 
-function isAllowedOrigin(req: IncomingMessage): boolean {
+function requestOriginAllowed(req: IncomingMessage): boolean {
   const origin = req.headers.origin
-  if (!origin) return true // 无 Origin（非浏览器请求）→ 由 session token 兜底
-  return ALLOWED_ORIGINS.has(origin)
+  return isAllowedOrigin(origin as string | undefined)
 }
 
 function jsonHeaders(origin?: string) {
   return {
     'Content-Type': 'application/json',
-    'Access-Control-Allow-Origin': origin && ALLOWED_ORIGINS.has(origin) ? origin : 'http://localhost:3000',
+    'Access-Control-Allow-Origin': corsOrigin(origin),
     'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
     'Access-Control-Allow-Headers': `Content-Type, ${getSessionHeaderName()}`,
   }
@@ -111,7 +104,7 @@ function guardSensitive(req: IncomingMessage, res: ServerResponse, port: number,
     res.end(JSON.stringify({ error: 'FORBIDDEN' }))
     return false
   }
-  if (!isAllowedOrigin(req)) {
+  if (!requestOriginAllowed(req)) {
     securityFuse.recordBadOrigin()
     res.writeHead(403, { 'Content-Type': 'application/json' })
     res.end(JSON.stringify({ error: 'FORBIDDEN' }))
@@ -256,7 +249,7 @@ export async function handleAiConfigRequest(req: IncomingMessage, res: ServerRes
 
   // === GET /ai/session（bootstrap，loopback + origin 保护）===
   if (req.method === 'GET' && pathname === '/ai/session') {
-    if (!isLoopback(req) || !isAllowedHost(req) || !isAllowedOrigin(req)) {
+    if (!isLoopback(req) || !isAllowedHost(req) || !requestOriginAllowed(req)) {
       securityFuse.recordBadOrigin()
       res.writeHead(403, { 'Content-Type': 'application/json' })
       res.end(JSON.stringify({ error: 'FORBIDDEN' }))
@@ -293,7 +286,9 @@ export async function handleAiConfigRequest(req: IncomingMessage, res: ServerRes
 
       // SSRF 全量校验（结构 + DNS + 私网拒绝）
       try {
-        await assertSafeRemoteUrl(baseUrl)
+        await assertSafeRemoteUrl(baseUrl, {
+          allowKnownMiMoProxy: parsedConfig.providerType === 'mimo' && !isHostedRuntime(),
+        })
       } catch {
         securityFuse.recordSsrfTarget()
         res.writeHead(400, { 'Content-Type': 'application/json' })
@@ -355,7 +350,9 @@ export async function handleAiConfigRequest(req: IncomingMessage, res: ServerRes
 
       // SSRF 全量校验
       try {
-        await assertSafeRemoteUrl(baseUrl)
+        await assertSafeRemoteUrl(baseUrl, {
+          allowKnownMiMoProxy: parsedConfig.providerType === 'mimo' && !isHostedRuntime(),
+        })
       } catch {
         securityFuse.recordSsrfTarget()
         res.writeHead(400, { 'Content-Type': 'application/json' })

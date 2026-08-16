@@ -181,6 +181,10 @@ export class DexieScheduleRepository implements ScheduleRepository {
 
 // --- Completion ---
 export class DexieCompletionRepository implements CompletionRepository {
+  async getAll(): Promise<CompletionRecord[]> {
+    return db.completionRecords.toArray()
+  }
+
   async getByTaskId(taskId: UUID): Promise<CompletionRecord[]> {
     return db.completionRecords.where('taskId').equals(taskId).toArray()
   }

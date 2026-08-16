@@ -60,6 +60,7 @@ npm-debug.log*
 
 # WorkBuddy private state
 .workbuddy/
+.planning/
 
 # Vite timestamps
 vite.config.ts.timestamp-*.mjs

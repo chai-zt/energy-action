@@ -13,11 +13,12 @@ import type { SecretStore } from '../server/security/secretStore.ts'
 
 const tempDir = mkdtempSync(join(tmpdir(), 'energy-action-security-'))
 process.env.PERSONAL_AI_OS_DATA_DIR = tempDir
+process.env.PERSONAL_AI_OS_MODE = 'hosted'
 
 const {
   MemorySecretStore, setSecretStoreForTest, resetSecretStoreCache,
 } = await import('../server/security/secretStore.ts')
-const { validateHttpsUrl, isPrivateOrReserved, SsrfError } = await import('../server/security/ssrf.ts')
+const { validateHttpsUrl, assertSafeRemoteUrl, isKnownMiMoHost, isPrivateOrReserved, SsrfError } = await import('../server/security/ssrf.ts')
 const { getSessionToken, isSessionValid } = await import('../server/security/session.ts')
 const { RateLimiter } = await import('../server/security/rateLimit.ts')
 const { securityFuse, resetSecurityFuse } = await import('../server/security/fuse.ts')
@@ -113,6 +114,15 @@ describe('SSRF', () => {
   it('合法公网 HTTPS 通过', () => {
     const u = validateHttpsUrl('https://api.example.com/v1')
     assert.equal(u.protocol, 'https:')
+  })
+
+  it('本地模式通过 loopback proxy 允许官方 MiMo 的 VPN 虚拟 DNS', async () => {
+    process.env.PERSONAL_AI_OS_MODE = 'local'
+    process.env.HTTPS_PROXY = 'http://127.0.0.1:7897'
+    assert.equal(isKnownMiMoHost('token-plan-cn.xiaomimimo.com'), true)
+    const result = await assertSafeRemoteUrl('https://token-plan-cn.xiaomimimo.com/v1', { allowKnownMiMoProxy: true })
+    assert.deepEqual(result.resolvedIps, [])
+    delete process.env.HTTPS_PROXY
   })
 })
 

@@ -2,11 +2,13 @@ import { Outlet, useLocation, useNavigate } from 'react-router-dom'
 import { cn } from '@/lib/utils'
 import {
   LayoutDashboard, Target, CheckSquare,
-  Calendar, BookOpen, Settings, Menu, X, Timer,
+  Calendar, BookOpen, Settings, Menu, X, Timer, CircleHelp,
 } from 'lucide-react'
 import { useState, useEffect } from 'react'
 import { AIAssistantFab } from '@/components/AIAssistantFab'
 import { AiStatusEntry } from '@/components/AiStatusEntry'
+import { UsageGuideDialog } from '@/components/UsageGuideDialog'
+import { isOnboardingCompleted, markOnboardingCompleted } from '@/services/onboarding'
 
 const desktopNav = [
   { path: '/today', label: '首页', icon: LayoutDashboard },
@@ -32,6 +34,15 @@ export function AppLayout() {
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false)
   const [isMobile, setIsMobile] = useState(false)
 
+  // 首次访问自动弹窗（App 全局初始化时判断一次；关闭后写 onboarding 完成态，不再自动弹出）
+  const [guideOpen, setGuideOpen] = useState<boolean>(() => !isOnboardingCompleted())
+
+  const openGuide = () => setGuideOpen(true)
+  const closeGuide = () => {
+    markOnboardingCompleted()
+    setGuideOpen(false)
+  }
+
   useEffect(() => {
     const check = () => setIsMobile(window.innerWidth < 768)
     check()
@@ -45,7 +56,7 @@ export function AppLayout() {
       {!isMobile && (
         <aside className="fixed left-0 top-0 bottom-0 w-56 bg-white border-r border-slate-200 flex flex-col z-30">
           <div className="h-14 flex items-center px-4 border-b border-slate-100">
-            <span className="font-bold text-lg text-slate-800">Personal AI OS</span>
+            <span className="font-bold text-lg text-slate-800">Energy Action</span>
           </div>
           <nav className="flex-1 py-2 px-2">
             {desktopNav.map(item => {
@@ -78,8 +89,16 @@ export function AppLayout() {
         {/* Mobile Header */}
         {isMobile && (
           <header className="sticky top-0 z-20 bg-white border-b border-slate-200 h-14 flex items-center justify-between px-4">
-            <span className="font-bold text-lg text-slate-800">Personal AI OS</span>
+            <span className="font-bold text-lg text-slate-800">Energy Action</span>
             <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={openGuide}
+                className="p-2 rounded-lg hover:bg-slate-100 touch-target"
+                aria-label="使用指南"
+              >
+                <CircleHelp size={20} className="text-slate-500" />
+              </button>
               <AiStatusEntry />
               <button
                 onClick={() => setMobileMenuOpen(!mobileMenuOpen)}
@@ -149,15 +168,27 @@ export function AppLayout() {
         </nav>
       )}
 
-      {/* 全局 AI 状态入口（桌面右上角） */}
+      {/* 全局入口：使用指南 + AI 配置（桌面右上角） */}
       {!isMobile && (
-        <div className="fixed top-3 right-4 z-40">
+        <div className="fixed top-3 right-4 z-40 flex items-center gap-2">
+          <button
+            type="button"
+            onClick={openGuide}
+            className="flex items-center gap-1.5 px-2.5 py-1 rounded-full border border-slate-200 bg-white text-xs font-medium text-slate-600 hover:opacity-75 transition-opacity"
+            title="使用指南"
+          >
+            <CircleHelp size={12} />
+            使用指南
+          </button>
           <AiStatusEntry />
         </div>
       )}
 
       {/* 全局 AI 助手浮动入口 */}
       <AIAssistantFab />
+
+      {/* 首次访问 / 手动「使用指南」共用的唯一弹窗 */}
+      <UsageGuideDialog open={guideOpen} onClose={closeGuide} />
     </div>
   )
 }

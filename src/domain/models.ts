@@ -1,6 +1,6 @@
 // ============================================================
 // 领域模型类型定义
-// Personal AI OS — Domain Models
+// Energy Action — Domain Models
 // ============================================================
 
 import type { Task, TaskStatus } from './task'
@@ -38,6 +38,9 @@ export type ProjectProgressMode = 'manual' | 'task'
 
 export type CognitiveLoad = 'low' | 'medium' | 'high'
 export type EnergyDemand = 1 | 2 | 3 | 4 | 5
+
+/** 用户当前精力等级（三档，AI 层统一语义，区别于 Task.cognitiveLoad / Task.energyDemand） */
+export type EnergyLevel = 'low' | 'medium' | 'high'
 
 export type PriorityLevel = 'P0' | 'P1' | 'P2' | 'P3'
 export type Confidence = 'low' | 'medium' | 'high'
@@ -172,6 +175,8 @@ export interface CompletionRecord {
   taskId: UUID
   completedDate: ISODate
   completedAt: ISODateTime
+  /** 完成行为获得的行动币；旧记录缺失时按 1 兼容读取。 */
+  rewardPoints?: number
   status: 'completed' | 'skipped'   // 第六轮新增
   energyCostSnapshot: number         // 第六轮新增: 完成扣点(5/10/20/30/40), 跳过=0
   taskTitleSnapshot: string          // 第六轮新增: 完成时任务名称快照

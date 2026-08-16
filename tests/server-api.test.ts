@@ -10,7 +10,8 @@ process.env.PERSONAL_AI_OS_TEST = '1'
 
 const { handleRequest } = await import('../server/index.ts')
 const { setProvider } = await import('../server/ai/providers/mimoProvider.ts')
-const { readDecompositions } = await import('../server/dataStore.ts')
+const { backfillLargeTaskDueDates, readDecompositions } = await import('../server/dataStore.ts')
+const { getDb } = await import('../server/db/sqlite.ts')
 
 // fake MiMo provider（mock fetch 层，不访问公网）
 function fakeProvider({ decompose, minAction, fail }: { decompose?: unknown; minAction?: unknown; fail?: boolean } = {}) {
@@ -58,7 +59,7 @@ try {
   const legacyProjectCreatedAt = '2026-01-02T03:04:05.000Z'
   const createdProject = await request('/projects', 'POST', {
     id: legacyProjectId,
-    name: 'Personal AI OS 开发',
+    name: 'Energy Action 开发',
     status: 'active',
     progressMode: 'task',
     createdAt: legacyProjectCreatedAt,
@@ -67,19 +68,39 @@ try {
   assert.equal(createdProject.status, 201)
   const project = await createdProject.json() as { id: string; name: string; createdAt: string }
   assert.equal(project.id, legacyProjectId)
-  assert.equal(project.name, 'Personal AI OS 开发')
+  assert.equal(project.name, 'Energy Action 开发')
   assert.equal(project.createdAt, legacyProjectCreatedAt)
 
-  const renamedProject = await request(`/projects/${project.id}`, 'PATCH', { name: 'Personal AI OS 任务组' })
+  const renamedProject = await request(`/projects/${project.id}`, 'PATCH', { name: 'Energy Action 任务组' })
   assert.equal(renamedProject.status, 200)
-  assert.equal((await renamedProject.json() as { name: string }).name, 'Personal AI OS 任务组')
+  assert.equal((await renamedProject.json() as { name: string }).name, 'Energy Action 任务组')
   const projects = await request('/projects')
   assert.equal((await projects.json() as { id: string }[]).some(item => item.id === project.id), true)
 
-  const created = await request('/tasks', 'POST', { title: '写 Personal AI OS README', plannedDate: '2026-08-11', taskKind: 'large' })
+  const created = await request('/tasks', 'POST', {
+    title: '写 Energy Action README',
+    plannedDate: '2026-08-11',
+    taskKind: 'large',
+    createdAt: '2026-01-31T03:04:05.000Z',
+  })
   assert.equal(created.status, 201)
-  const task = await created.json() as { id: string; title: string }
-  assert.equal(task.title, '写 Personal AI OS README')
+  const task = await created.json() as { id: string; title: string; dueDate: string | null }
+  assert.equal(task.title, '写 Energy Action README')
+  assert.equal(task.dueDate, '2026-04-30')
+
+  const manualDueResponse = await request('/tasks', 'POST', {
+    title: '手动截止日期的大任务', taskKind: 'large', dueDate: '2026-06-01', createdAt: '2026-01-31T03:04:05.000Z',
+  })
+  assert.equal((await manualDueResponse.json() as { dueDate: string | null }).dueDate, '2026-06-01')
+
+  const smallWithoutDueResponse = await request('/tasks', 'POST', {
+    title: '没有截止日期的小任务', taskKind: 'small', createdAt: '2026-01-31T03:04:05.000Z',
+  })
+  assert.equal((await smallWithoutDueResponse.json() as { dueDate: string | null }).dueDate, null)
+
+  getDb().prepare('UPDATE tasks SET due_date = NULL WHERE id = ?').run(task.id)
+  assert.equal(backfillLargeTaskDueDates(), 1)
+  assert.equal((await (await request(`/tasks/${task.id}`)).json() as { dueDate: string | null }).dueDate, '2026-04-30')
 
   const attachedToProject = await request(`/tasks/${task.id}`, 'PATCH', { projectId: project.id })
   assert.equal(attachedToProject.status, 200)
@@ -180,8 +201,8 @@ try {
   assert.equal((await (await request('/tasks')).json() as { id: string }[]).some(item => item.id === expiredTaskId), false)
 
   const decompositions = readDecompositions()
-  const originalDecomposition = decompositions.find(item => item.originalInput.title === '写 Personal AI OS README')
-  assert.equal(originalDecomposition?.originalInput.title, '写 Personal AI OS README')
+  const originalDecomposition = decompositions.find(item => item.originalInput.title === '写 Energy Action README')
+  assert.equal(originalDecomposition?.originalInput.title, '写 Energy Action README')
   assert.equal((originalDecomposition?.originalOutput as { decomposition: { children: unknown[] } }).decomposition.children.length, 2)
 
   const deleted = await request(`/tasks/${result.childTasks[0].id}`, 'DELETE')

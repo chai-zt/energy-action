@@ -37,6 +37,41 @@ const fromJson = (s: string | null): unknown => {
   try { return JSON.parse(s) } catch { return null }
 }
 
+export function addCalendarMonths(dateValue: string, months: number): string {
+  const match = /^(\d{4})-(\d{2})-(\d{2})/.exec(dateValue)
+  if (!match) throw new Error(`Invalid ISO date: ${dateValue}`)
+  const year = Number(match[1])
+  const month = Number(match[2]) - 1
+  const day = Number(match[3])
+  const firstOfTargetMonth = new Date(Date.UTC(year, month + months, 1))
+  const lastDay = new Date(Date.UTC(
+    firstOfTargetMonth.getUTCFullYear(),
+    firstOfTargetMonth.getUTCMonth() + 1,
+    0,
+  )).getUTCDate()
+  firstOfTargetMonth.setUTCDate(Math.min(day, lastDay))
+  return firstOfTargetMonth.toISOString().slice(0, 10)
+}
+
+export function backfillLargeTaskDueDates(): number {
+  const db = getDb()
+  const rows = db.prepare(`
+    SELECT id, created_at
+    FROM tasks
+    WHERE task_kind = 'large'
+      AND parent_task_id IS NULL
+      AND due_date IS NULL
+  `).all() as Array<{ id: string; created_at: string }>
+  if (rows.length === 0) return 0
+
+  const update = db.prepare('UPDATE tasks SET due_date = ?, updated_at = ? WHERE id = ?')
+  const updatedAt = new Date().toISOString()
+  transaction(() => {
+    for (const row of rows) update.run(addCalendarMonths(row.created_at, 3), updatedAt, row.id)
+  })
+  return rows.length
+}
+
 // === Task 映射 ===
 
 type TaskRow = Record<string, unknown>

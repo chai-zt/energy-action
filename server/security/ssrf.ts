@@ -100,6 +100,29 @@ export interface ValidatedRemote {
   resolvedIps: string[]
 }
 
+const KNOWN_MIMO_HOSTS = new Set([
+  'api.xiaomimimo.com',
+  'token-plan-cn.xiaomimimo.com',
+  'token-plan-sgp.xiaomimimo.com',
+  'token-plan-ams.xiaomimimo.com',
+])
+
+function localProxyConfigured(): boolean {
+  const raw = process.env.HTTPS_PROXY || process.env.https_proxy || process.env.HTTP_PROXY || process.env.http_proxy
+  if (!raw) return false
+  try {
+    const proxy = new URL(raw)
+    return (proxy.protocol === 'http:' || proxy.protocol === 'https:')
+      && ['localhost', '127.0.0.1', '::1'].includes(proxy.hostname)
+  } catch {
+    return false
+  }
+}
+
+export function isKnownMiMoHost(hostname: string): boolean {
+  return KNOWN_MIMO_HOSTS.has(hostname.toLowerCase().replace(/^\[|\]$/g, ''))
+}
+
 /** 校验 URL 结构（协议 / userinfo / fragment / 端口），不做 DNS。 */
 export function validateHttpsUrl(raw: string): URL {
   let url: URL
@@ -129,9 +152,22 @@ export function validateHttpsUrl(raw: string): URL {
 }
 
 /** 全量校验：结构 + DNS 解析 + 私网/保留段拒绝。 */
-export async function assertSafeRemoteUrl(raw: string): Promise<ValidatedRemote> {
+export async function assertSafeRemoteUrl(
+  raw: string,
+  options: { allowKnownMiMoProxy?: boolean } = {},
+): Promise<ValidatedRemote> {
   const url = validateHttpsUrl(raw)
   const hostname = hostnameOf(url)
+
+  // VPN/TUN clients may return a synthetic 198.18.* address locally while a
+  // configured loopback proxy resolves the real public destination. Keep this
+  // exception limited to official MiMo hosts and local runtime only.
+  if (options.allowKnownMiMoProxy
+    && process.env.PERSONAL_AI_OS_MODE !== 'hosted'
+    && isKnownMiMoHost(hostname)
+    && localProxyConfigured()) {
+    return { url, hostname, resolvedIps: [] }
+  }
 
   // 直接是 IP 字面量
   if (isIP(hostname)) {

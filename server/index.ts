@@ -1,19 +1,23 @@
 // ============================================================
-// Personal AI OS Backend — Entry Point
+// Energy Action Backend — Entry Point
 // Node.js 22 built-in http — zero external dependencies
 // ============================================================
 
 import { createServer } from 'node:http'
-import { atomicWriteAll, purgeExpiredRecycleBin, readDecompositions, readMinActions, readProjects, readTasks } from './dataStore.ts'
+import { addCalendarMonths, atomicWriteAll, backfillLargeTaskDueDates, purgeExpiredRecycleBin, readDecompositions, readMinActions, readProjects, readTasks } from './dataStore.ts'
 import { decomposeTask } from './services/decomposeService.ts'
+import { regenerateMinimumAction } from './services/minimumActionService.ts'
 import { handleAiConfigRequest } from './ai/configApi.ts'
 import { getAiAvailability } from './ai/availability.ts'
 import { buildProviderFromConfig } from './ai/providers/providerFactory.ts'
 import { setResolvedProvider, hasExplicitProvider, AiError } from './ai/providers/mimoProvider.ts'
 import { decomposeLimiter } from './security/rateLimit.ts'
-import type { Task } from '../src/domain/models.ts'
+import { corsOrigin } from './runtime.ts'
+import type { Task, EnergyLevel } from '../src/domain/models.ts'
 
 const PORT = parseInt(process.env.PORT || '4001', 10)
+backfillLargeTaskDueDates()
+
 function writeTasks(tasks: ReturnType<typeof readTasks>) {
   atomicWriteAll({ tasks, minActions: readMinActions(), decompositions: readDecompositions(), projects: readProjects() })
 }
@@ -29,9 +33,9 @@ function writeProjects(projects: ReturnType<typeof readProjects>) {
 // ponytail: 文件读写够用, 升级路径: 替换为 pg pool
 
 // === CORS（仅本地前端 origin，不回显 *）===
-function corsHeaders() {
+function corsHeaders(req: any) {
   return {
-    'Access-Control-Allow-Origin': 'http://localhost:3000',
+    'Access-Control-Allow-Origin': corsOrigin(typeof req?.headers?.origin === 'string' ? req.headers.origin : undefined),
     'Access-Control-Allow-Methods': 'GET, POST, PATCH, DELETE, OPTIONS',
     'Access-Control-Allow-Headers': 'Content-Type, X-Energy-Action-Session',
   }
@@ -85,10 +89,36 @@ function getRecycledRoots(tasks: Task[]): Task[] {
   })
 }
 
+// === S1-D：energyLevel 参数校验（Server 不相信任意字符串，只接受 low/medium/high）===
+function parseEnergyLevel(value: unknown): EnergyLevel | 'invalid' | 'absent' {
+  if (value === undefined) return 'absent'
+  if (value === 'low' || value === 'medium' || value === 'high') return value
+  return 'invalid'
+}
+
+// === AI Provider 解析（decompose / minimum-action 复用：AI_AVAILABLE → Provider Factory）===
+async function resolveProviderOrFail(res: any, headers: any): Promise<boolean> {
+  if (hasExplicitProvider()) return true
+  const availability = await getAiAvailability()
+  if (!availability.available) {
+    res.writeHead(503, headers)
+    res.end(JSON.stringify({ error: 'AI_UNAVAILABLE', reason: availability.reason }))
+    return false
+  }
+  const provider = await buildProviderFromConfig()
+  if (!provider) {
+    res.writeHead(503, headers)
+    res.end(JSON.stringify({ error: 'AI_UNAVAILABLE', reason: 'no_secret' }))
+    return false
+  }
+  setResolvedProvider(provider)
+  return true
+}
+
 // === 路由 ===
 async function handleRequest(req: any, res: any): Promise<void> {
   const url = new URL(req.url, `http://localhost:${PORT}`)
-  const headers = { 'Content-Type': 'application/json', ...corsHeaders() }
+  const headers = { 'Content-Type': 'application/json', ...corsHeaders(req) }
 
   // === /ai/* 模型配置中心（含敏感 API 守卫 / session / SSRF）===
   if (await handleAiConfigRequest(req, res, PORT)) return
@@ -214,6 +244,9 @@ async function handleRequest(req: any, res: any): Promise<void> {
         res.writeHead(409, headers)
         res.end(JSON.stringify({ error: 'TASK_ALREADY_EXISTS' })); return
       }
+      const createdAt = typeof body.createdAt === 'string' ? body.createdAt : now
+      const parentTaskId = body.parentTaskId || null
+      const taskKind = body.taskKind === 'large' || body.taskKind === 'small' ? body.taskKind : undefined
       const task = {
         id,
         title: body.title.trim(),
@@ -222,14 +255,14 @@ async function handleRequest(req: any, res: any): Promise<void> {
         goalId: body.goalId || null,
         keyResultId: body.keyResultId || null,
         columnId: body.columnId || null,
-        parentTaskId: body.parentTaskId || null,
-        taskKind: body.taskKind === 'large' || body.taskKind === 'small' ? body.taskKind : undefined,
+        parentTaskId,
+        taskKind,
         status: body.status || 'todo',
         userPriority: body.userPriority || null,
         aiPriorityScore: body.aiPriorityScore || 0,
         aiPriorityLevel: body.aiPriorityLevel || null,
         aiPriorityReason: body.aiPriorityReason || '',
-        dueDate: body.dueDate || null,
+        dueDate: body.dueDate || (taskKind === 'large' && !parentTaskId ? addCalendarMonths(createdAt, 3) : null),
         plannedDate: body.plannedDate || null,
         estimatedMinutes: body.estimatedMinutes || 0,
         actualMinutes: body.actualMinutes || 0,
@@ -241,7 +274,7 @@ async function handleRequest(req: any, res: any): Promise<void> {
         order: typeof body.order === 'number'
           ? body.order
           : Math.max(0, ...tasks.filter((item: Task) => !item.deletedAt && item.parentTaskId === (body.parentTaskId || null)).map(item => item.order + 1)),
-        createdAt: typeof body.createdAt === 'string' ? body.createdAt : now,
+        createdAt,
         updatedAt: typeof body.updatedAt === 'string' ? body.updatedAt : now,
         deletedAt: typeof body.deletedAt === 'string' ? body.deletedAt : null,
       }
@@ -449,6 +482,58 @@ async function handleRequest(req: any, res: any): Promise<void> {
     return
   }
 
+  // === POST /tasks/:taskId/minimum-action（S1-D：只重新生成最小行动，不重新拆解）===
+  const minActionRegenMatch = url.pathname.match(/^\/tasks\/([^/]+)\/minimum-action$/)
+  if (req.method === 'POST' && minActionRegenMatch) {
+    // 限流（与 decompose 共用 10/min 桶上限）
+    if (!decomposeLimiter.allow('minimum-action')) {
+      res.writeHead(429, headers)
+      res.end(JSON.stringify({ error: 'RATE_LIMITED' }))
+      return
+    }
+
+    let body: any
+    try {
+      body = await parseBody(req)
+    } catch (err: any) {
+      res.writeHead(400, headers)
+      res.end(JSON.stringify({ error: err.message }))
+      return
+    }
+
+    // energyLevel 必填且只允许 low/medium/high
+    const energyLevel = parseEnergyLevel(body.energyLevel)
+    if (energyLevel === 'invalid' || energyLevel === 'absent') {
+      res.writeHead(400, headers)
+      res.end(JSON.stringify({ error: 'energyLevel must be low, medium or high' }))
+      return
+    }
+
+    if (!(await resolveProviderOrFail(res, headers))) return
+
+    try {
+      const data = await regenerateMinimumAction(minActionRegenMatch[1], energyLevel)
+      res.writeHead(200, headers)
+      res.end(JSON.stringify(data))
+    } catch (err: any) {
+      if (err instanceof AiError && (err.status === 401 || err.status === 403)) {
+        const { updateVerificationStatus } = await import('./ai/providerConfig.ts')
+        updateVerificationStatus('failed')
+      }
+      if (err.message?.includes('not found')) {
+        res.writeHead(404, headers)
+        res.end(JSON.stringify({ error: 'TASK_NOT_FOUND', detail: err.message }))
+      } else if (err.name === 'ValidationError') {
+        res.writeHead(422, headers)
+        res.end(JSON.stringify({ error: 'AI_MINIMUM_ACTION_FAILED', detail: err.message }))
+      } else {
+        res.writeHead(502, headers)
+        res.end(JSON.stringify({ error: 'AI_MINIMUM_ACTION_FAILED', detail: err.message }))
+      }
+    }
+    return
+  }
+
   // === POST /tasks/:taskId/decompose ===
   const decomposeMatch = url.pathname.match(/^\/tasks\/(.+)\/decompose$/)
   if (req.method === 'POST' && decomposeMatch) {
@@ -458,25 +543,28 @@ async function handleRequest(req: any, res: any): Promise<void> {
       res.end(JSON.stringify({ error: 'RATE_LIMITED' }))
       return
     }
-    // 非测试注入场景：AI 可用性检查 + 从本地 Config/Secret 解析 Provider
-    if (!hasExplicitProvider()) {
-      const availability = await getAiAvailability()
-      if (!availability.available) {
-        res.writeHead(503, headers)
-        res.end(JSON.stringify({ error: 'AI_UNAVAILABLE', reason: availability.reason }))
-        return
-      }
-      const provider = await buildProviderFromConfig()
-      if (!provider) {
-        res.writeHead(503, headers)
-        res.end(JSON.stringify({ error: 'AI_UNAVAILABLE', reason: 'no_secret' }))
-        return
-      }
-      setResolvedProvider(provider)
+
+    // 读取 body（可选 energyLevel）
+    let body: any = {}
+    try {
+      body = await parseBody(req)
+    } catch (err: any) {
+      res.writeHead(400, headers)
+      res.end(JSON.stringify({ error: err.message }))
+      return
+    }
+    const energyLevel = parseEnergyLevel(body.energyLevel)
+    if (energyLevel === 'invalid') {
+      res.writeHead(400, headers)
+      res.end(JSON.stringify({ error: 'energyLevel must be low, medium or high' }))
+      return
     }
 
+    // 非测试注入场景：AI 可用性检查 + 从本地 Config/Secret 解析 Provider
+    if (!(await resolveProviderOrFail(res, headers))) return
+
     try {
-      const data = await decomposeTask(decomposeMatch[1])
+      const data = await decomposeTask(decomposeMatch[1], energyLevel === 'absent' ? undefined : energyLevel)
       res.writeHead(200, headers)
       res.end(JSON.stringify(data))
     } catch (err: any) {

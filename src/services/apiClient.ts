@@ -14,7 +14,8 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   })
   if (!res.ok) {
     const body = await res.json().catch(() => ({ error: res.statusText }))
-    throw new Error(body.error || `API ${res.status}`)
+    const error = body.error || `API ${res.status}`
+    throw new Error(body.detail ? `${error}: ${body.detail}` : error)
   }
   return res.json()
 }
@@ -103,15 +104,35 @@ export interface DecompositionResult {
   minimumActions: { id: string; taskId: string; description: string }[]
 }
 
-export async function decomposeTask(taskId: string): Promise<DecompositionResult> {
+export async function decomposeTask(taskId: string, energyLevel?: string): Promise<DecompositionResult> {
   const res = await fetch(`${BASE_URL}/tasks/${encodeURIComponent(taskId)}/decompose`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ energyLevel }),
   })
   if (!res.ok) {
-    // 区分：404=任务不存在, 其他=AI失败
+    // 区分：404=任务不存在, 其他=AI失败；保留后端 detail 便于本地诊断。
+    const body = await res.json().catch(() => ({})) as { error?: string; detail?: string }
+    if (res.status === 404) throw new Error(body.detail ? `TASK_NOT_FOUND: ${body.detail}` : 'TASK_NOT_FOUND')
+    throw new Error(body.detail ? `${body.error || 'AI_DECOMPOSITION_FAILED'}: ${body.detail}` : (body.error || 'AI_DECOMPOSITION_FAILED'))
+  }
+  return res.json()
+}
+
+export interface RegenerateMinimumActionResult {
+  minimumActions: { id: string; taskId: string; description: string; estimatedMinutes: number; difficulty: number }[]
+}
+
+/** 重新生成最小行动（只调用 minimum-action-v1，不重新拆解）。 */
+export async function regenerateMinimumAction(taskId: string, energyLevel: string): Promise<RegenerateMinimumActionResult> {
+  const res = await fetch(`${BASE_URL}/tasks/${encodeURIComponent(taskId)}/minimum-action`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ energyLevel }),
+  })
+  if (!res.ok) {
     if (res.status === 404) throw new Error('TASK_NOT_FOUND')
-    throw new Error('AI_DECOMPOSITION_FAILED')
+    throw new Error('AI_MINIMUM_ACTION_FAILED')
   }
   return res.json()
 }

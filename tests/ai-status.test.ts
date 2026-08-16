@@ -11,6 +11,7 @@ import { join } from 'node:path'
 const tempDir = mkdtempSync(join(tmpdir(), 'energy-action-status-'))
 process.env.PERSONAL_AI_OS_DATA_DIR = tempDir
 process.env.PERSONAL_AI_OS_TEST = '1'
+process.env.PERSONAL_AI_OS_MODE = 'hosted'
 
 const { handleRequest } = await import('../server/index.ts')
 

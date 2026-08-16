@@ -8,11 +8,11 @@ import { today, generateId } from '@/lib/utils'
 import {
   AlertTriangle, CheckCircle2, Clock, TrendingUp, Zap,
   Brain, ChevronRight, Plus, Flame, CalendarCheck, Activity,
-  FolderKanban, BookOpen, SkipForward, RotateCcw, Trash2,
+  BookOpen, SkipForward, RotateCcw, Trash2,
 } from 'lucide-react'
 import { shouldExecuteOnDate } from '@/services/recurrenceEngine'
 import { getEnergyCost, calcRemainingEnergy } from '@/services/energyService'
-import type { Task, Goal, Project, AIPriorityResult, DailyState, CompletionRecord, TaskSchedule } from '@/domain/models'
+import type { Task, Goal, AIPriorityResult, DailyState, CompletionRecord, TaskSchedule } from '@/domain/models'
 import { useNavigate } from 'react-router-dom'
 import { cn } from '@/lib/utils'
 import { PriorityLegend } from '@/components/PriorityLegend'
@@ -126,13 +126,48 @@ function getRecurrenceLabel(rule: string): string {
   return ''
 }
 
+export function isTaskCompletedOnDate(task: Task, records: CompletionRecord[], date: string): boolean {
+  if (!task.isHabit) return task.status === 'done'
+  return records.some(record => record.taskId === task.id && record.completedDate === date && record.status === 'completed')
+}
+
+export function getTodayExecutionSections(tasks: Task[], records: CompletionRecord[], date: string) {
+  const visibleTasks = tasks.filter(task => !task.deletedAt && task.status !== 'cancelled')
+  const parentIds = new Set(visibleTasks.flatMap(task => task.parentTaskId ? [task.parentTaskId] : []))
+  const completedToday = (task: Task) => (
+    task.completedAt?.startsWith(date)
+    || records.some(record => record.taskId === task.id && record.completedDate === date && record.status === 'completed')
+  )
+  const happenedToday = (task: Task) => (
+    task.plannedDate === date
+    || task.dueDate === date
+    || completedToday(task)
+  )
+  const isActiveLargeTask = (task: Task) => (
+    (task.status !== 'done' && task.createdAt.slice(0, 10) <= date)
+    || completedToday(task)
+  )
+  const byCompletionThenOrder = (left: Task, right: Task) => (
+    Number(isTaskCompletedOnDate(left, records, date)) - Number(isTaskCompletedOnDate(right, records, date))
+    || (left.order || 0) - (right.order || 0)
+    || right.createdAt.localeCompare(left.createdAt)
+  )
+
+  return {
+    largeTasks: visibleTasks
+      .filter(task => !task.parentTaskId && !task.isHabit && (task.taskKind === 'large' || parentIds.has(task.id)) && isActiveLargeTask(task))
+      .sort(byCompletionThenOrder),
+    habitTasks: visibleTasks
+      .filter(task => !task.parentTaskId && task.isHabit && (shouldExecuteOnDate(task, date) || happenedToday(task)))
+      .sort(byCompletionThenOrder),
+  }
+}
+
 export function DashboardPage() {
   const navigate = useNavigate()
   const [tasks, setTasks] = useState<Task[]>([])
   const [goals, setGoals] = useState<Goal[]>([])
-  const [projects, setProjects] = useState<Project[]>([])
   const [dailyState, setDailyState] = useState<DailyState | null>(null)
-  const [completions, setCompletions] = useState<CompletionRecord[]>([])
   const [allCompletions, setAllCompletions] = useState<CompletionRecord[]>([])
   const [priorityResults, setPriorityResults] = useState<AIPriorityResult[]>([])
   const [loading, setLoading] = useState(true)
@@ -142,10 +177,6 @@ export function DashboardPage() {
   const [addingAsHabit, setAddingAsHabit] = useState(false)
   const [expandedTaskId, setExpandedTaskId] = useState<string | null>(null)
   const [showDeferPicker, setShowDeferPicker] = useState(false)
-  const [expandedProjectId, setExpandedProjectId] = useState<string | null>(null)
-  const [projectDailyLogs, setProjectDailyLogs] = useState<Record<string, any[]>>({})
-  const [projectLogInput, setProjectLogInput] = useState('')
-  const [showAllProjects, setShowAllProjects] = useState(false)
 
   const todayStr = today()
 
@@ -156,30 +187,25 @@ export function DashboardPage() {
     const stateRepo = new DexieDailyStateRepository()
     const compRepo = new DexieCompletionRepository()
 
-    const [allTasks, allGoals, allProjects, state, todayCompletions] = await Promise.all([
+    const [allTasks, allGoals, allProjects, state, allCompletionRecords] = await Promise.all([
       taskRepo.getAll(),
       goalRepo.getAll(),
       projectRepo.getAll(),
       stateRepo.getByDate(todayStr),
-      compRepo.getByDate(todayStr),
+      compRepo.getAll(),
     ])
-
-    const { db } = await import('@/storage/db')
-    const allCompletionsData = await db.completionRecords.toArray()
 
     setTasks(allTasks.filter(t => !t.deletedAt))
     setGoals(allGoals.filter(g => g.status === 'active' && !g.deletedAt))
-    setProjects(allProjects.filter(p => !p.deletedAt))
     setDailyState(state || null)
-    setCompletions(todayCompletions)
-    setAllCompletions(allCompletionsData)
+    setAllCompletions(allCompletionRecords)
 
     const result = await priorityProvider.prioritize({
       tasks: allTasks.filter(t => !t.deletedAt),
       goals: allGoals,
       projects: allProjects,
       dailyState: state || null,
-      completionRecords: allCompletionsData,
+      completionRecords: allCompletionRecords,
     })
     setPriorityResults(result.results)
   }
@@ -197,34 +223,6 @@ export function DashboardPage() {
     }
     load()
   }, [])
-
-  // 启动时补齐缺失的 ProjectDailyLog
-  useEffect(() => {
-    const catchUp = async () => {
-      const { db } = await import('@/storage/db')
-      const activeProjects = projects.filter(p => !p.deletedAt && p.status !== 'completed' && p.startDate)
-      const allLogs = await db.projectDailyLogs.toArray()
-      const { generateAutoLog, getMissingDates } = await import('@/services/projectDailyLogService')
-
-      for (const p of activeProjects) {
-        const existingDates = new Set(allLogs.filter(l => l.projectId === p.id).map(l => l.date))
-        const missing = getMissingDates(p, existingDates, todayStr)
-        for (const date of missing) {
-          const log = generateAutoLog(p, date, tasks, allCompletions, [])
-          await db.projectDailyLogs.put(log)
-        }
-      }
-      // 重新加载日志
-      const updated = await db.projectDailyLogs.toArray()
-      const grouped: Record<string, any[]> = {}
-      for (const log of updated) {
-        if (!grouped[log.projectId]) grouped[log.projectId] = []
-        grouped[log.projectId].push(log)
-      }
-      setProjectDailyLogs(grouped)
-    }
-    if (projects.length > 0) catchUp()
-  }, [projects.length])
 
   const handleQuickAdd = async (asHabit = false) => {
     if (!quickTitle.trim()) return
@@ -263,6 +261,35 @@ export function DashboardPage() {
     await refreshData()
   }
 
+  const handleToggleTodayTask = async (task: Task) => {
+    const taskRepo = new DexieTaskRepository()
+    const completionRepo = new DexieCompletionRepository()
+    const records = await completionRepo.getByTaskId(task.id)
+    const existing = records.find(record => record.completedDate === todayStr && record.status === 'completed')
+
+    if (existing) {
+      await completionRepo.delete(existing.id)
+      if (!task.isHabit) await taskRepo.update(task.id, { status: 'todo', completedAt: null })
+    } else {
+      const timestamp = new Date().toISOString()
+      await completionRepo.create({
+        id: generateId(),
+        taskId: task.id,
+        completedDate: todayStr,
+        completedAt: timestamp,
+        status: 'completed',
+        energyCostSnapshot: getEnergyCost({ energyDemand: task.energyDemand }),
+        rewardPoints: 1,
+        taskTitleSnapshot: task.title,
+        projectIdSnapshot: task.projectId,
+        createdAt: timestamp,
+      })
+      if (!task.isHabit) await taskRepo.update(task.id, { status: 'done', completedAt: timestamp })
+    }
+
+    await refreshData()
+  }
+
   if (loading) {
     return (
       <div className="flex items-center justify-center h-64">
@@ -277,32 +304,12 @@ export function DashboardPage() {
   const overdueTasks = activeTasks.filter(
     t => t.dueDate && t.dueDate < todayStr
   )
-  const todayTasks = activeTasks.filter(
-    t => t.plannedDate === todayStr || t.dueDate === todayStr || t.isHabit
-  )
   const unscheduledTasks = activeTasks.filter(
     t => !t.plannedDate && t.status !== 'inbox'
   )
-  const habitTasks = tasks.filter(t => t.isHabit && !t.deletedAt).sort((a, b) => (a.order || 0) - (b.order || 0))
-  const completedToday = tasks.filter(
-    t => t.status === 'done' && t.completedAt && t.completedAt.startsWith(todayStr)
-  )
-
-  // 今日所有应执行的任务（普通+固定）
-  const todayHabitTasks = habitTasks.filter(t => shouldExecuteOnDate(t, todayStr))
-  const allTodayTaskIds = new Set([
-    ...todayTasks.map(t => t.id),
-    ...todayHabitTasks.map(t => t.id),
-  ])
-  const allTodayTasks = tasks.filter(t => allTodayTaskIds.has(t.id))
-
-  // 今日优先级排序（全部今天任务参与）
-  const allTodaySorted = priorityResults
-    .filter(r => allTodayTaskIds.has(r.taskId))
-    .map(r => tasks.find(t => t.id === r.taskId)!)
-    .filter(Boolean)
-  const incompleteToday = allTodaySorted.filter(t => t.status !== 'done')
-  const completedTodaySorted = allTodaySorted.filter(t => t.status === 'done')
+  const { largeTasks: todayLargeTasks, habitTasks: todayHabitTasks } = getTodayExecutionSections(tasks, allCompletions, todayStr)
+  const todayTasks = [...todayLargeTasks, ...todayHabitTasks]
+  const completedToday = todayTasks.filter(task => isTaskCompletedOnDate(task, allCompletions, todayStr))
 
   // 精力计算
   const energy = calcRemainingEnergy(tasks, allCompletions, todayStr)
@@ -311,6 +318,64 @@ export function DashboardPage() {
   const hour = new Date().getHours()
   const greeting = hour < 12 ? '早上好' : hour < 18 ? '下午好' : '晚上好'
   const weekday = ['日', '一', '二', '三', '四', '五', '六'][new Date().getDay()]
+
+  const renderTodaySection = (id: string, title: string, description: string, sectionTasks: Task[]) => {
+    const completedCount = sectionTasks.filter(task => isTaskCompletedOnDate(task, allCompletions, todayStr)).length
+    return (
+      <section aria-labelledby={id}>
+        <div className="flex items-end justify-between gap-3 mb-2">
+          <div>
+            <h3 id={id} className="text-sm font-semibold text-slate-800">{title}</h3>
+            <p className="text-[11px] text-slate-400 mt-0.5">{description}</p>
+          </div>
+          <span className="text-[11px] tabular-nums text-slate-400 flex-shrink-0">{completedCount}/{sectionTasks.length} 完成</span>
+        </div>
+        {sectionTasks.length === 0 ? (
+          <div className="rounded-lg border border-dashed border-slate-200 bg-slate-50/60 px-3 py-4 text-center text-xs text-slate-400">
+            今天没有{title}
+          </div>
+        ) : (
+          <div className="space-y-1">
+            {sectionTasks.map(task => {
+              const isCompleted = isTaskCompletedOnDate(task, allCompletions, todayStr)
+              const priority = priorityResults.find(result => result.taskId === task.id)
+              return (
+                <div key={task.id} className={cn('group flex items-center gap-2.5 rounded-lg px-2 py-2 transition-colors hover:bg-slate-50', isCompleted && 'opacity-65')}>
+                  <button
+                    type="button"
+                    role="checkbox"
+                    aria-checked={isCompleted}
+                    aria-label={`${isCompleted ? '取消完成' : '完成'} ${task.title}`}
+                    onClick={() => void handleToggleTodayTask(task)}
+                    className={cn(
+                      'w-4 h-4 rounded border-2 flex items-center justify-center flex-shrink-0 focus:outline-none focus:ring-2 focus:ring-green-200',
+                      isCompleted ? 'bg-green-500 border-green-500' : 'border-slate-300 hover:border-green-400',
+                    )}
+                  >
+                    {isCompleted && <CheckCircle2 size={11} className="text-white" strokeWidth={3} />}
+                  </button>
+                  <div className="min-w-0 flex-1">
+                    <p className={cn('text-sm truncate', isCompleted ? 'line-through text-slate-400' : 'text-slate-700')}>{task.title}</p>
+                    <div className="mt-0.5 flex items-center gap-1.5 text-[10px] text-slate-400">
+                      <span className={task.isHabit ? 'text-emerald-600' : 'text-violet-600'}>{task.isHabit ? '习惯' : '大任务'}</span>
+                      {task.isHabit && task.recurrenceRule && <span>{getRecurrenceLabel(task.recurrenceRule)}</span>}
+                      {task.estimatedMinutes > 0 && <span>{task.estimatedMinutes} 分钟</span>}
+                    </div>
+                  </div>
+                  {!isCompleted && priority && (
+                    <span className={cn(
+                      'badge text-[10px] flex-shrink-0',
+                      priority.level === 'P0' ? 'badge-p0' : priority.level === 'P1' ? 'badge-p1' : priority.level === 'P2' ? 'badge-p2' : 'badge-p3',
+                    )}>{priority.level}</span>
+                  )}
+                </div>
+              )
+            })}
+          </div>
+        )}
+      </section>
+    )
+  }
 
   return (
     <div className="max-w-4xl mx-auto space-y-6">
@@ -614,201 +679,20 @@ export function DashboardPage() {
 
       {/* 今日执行中心 */}
       <div className="card">
-        <div className="flex items-center justify-between mb-3">
-          <h2 className="font-semibold text-slate-800 flex items-center gap-2">
+        <div className="flex items-center justify-between gap-4 mb-3">
+          <h2 className="font-semibold text-slate-800 flex items-center gap-2 whitespace-nowrap">
             <Brain size={18} className="text-blue-500" />
             今日执行中心
           </h2>
-          <PriorityLegend />
+          <div className="hidden md:block"><PriorityLegend /></div>
         </div>
 
-        {/* 固定任务快捷区 */}
-        <div className="mb-3 pb-3 border-b border-slate-100">
-          <div className="flex items-center justify-between mb-1">
-            <span className="text-[11px] font-medium text-slate-500">
-              今日固定任务 {
-                todayHabitTasks.filter(t =>
-                  allCompletions.some(c => c.taskId === t.id && c.completedDate === todayStr && c.status === 'completed')
-                ).length
-              }/{todayHabitTasks.length}
-            </span>
-            <div className="flex items-center gap-1">
-              <button onClick={() => { setAddingAsHabit(true); setShowQuickAdd(true) }} className="btn-ghost text-[10px] flex items-center gap-0.5">
-                <Plus size={11} /> 添加
-              </button>
-              <button onClick={() => navigate('/tasks?view=habits')} className="btn-ghost text-[10px]">
-                管理
-              </button>
-            </div>
-          </div>
-          {todayHabitTasks.length === 0 ? (
-            <p className="text-[10px] text-slate-400">今天没有固定任务</p>
-          ) : (
-            <div className="flex items-center flex-wrap gap-1.5">
-              {todayHabitTasks.map(ht => {
-                const doneRec = allCompletions.find(c => c.taskId === ht.id && c.completedDate === todayStr && c.status === 'completed')
-                const isDone = !!doneRec
-                return (
-                  <button
-                    key={ht.id}
-                    onClick={async () => {
-                      const { db } = await import('@/storage/db')
-                      const repo = new DexieTaskRepository()
-                      if (isDone) {
-                        // 撤回：删除 CompletionRecord + 重置任务状态
-                        const rec = await db.completionRecords
-                          .where({ taskId: ht.id, completedDate: todayStr, status: 'completed' as const })
-                          .first()
-                        if (rec) await db.completionRecords.delete(rec.id)
-                        await repo.update(ht.id, { status: 'todo' as const, completedAt: null as any })
-                      } else {
-                        // 完成：创建 CompletionRecord + 更新状态
-                        await db.completionRecords.add({
-                          id: generateId(),
-                          taskId: ht.id, completedDate: todayStr,
-                          completedAt: new Date().toISOString(),
-                          status: 'completed',
-                          energyCostSnapshot: getEnergyCost({ energyDemand: ht.energyDemand }),
-                          taskTitleSnapshot: ht.title, projectIdSnapshot: ht.projectId,
-                          createdAt: new Date().toISOString(),
-                        })
-                        await repo.update(ht.id, { status: 'done' as const, completedAt: new Date().toISOString() })
-                      }
-                      await refreshData()
-                    }}
-                    className={cn(
-                      'text-[10px] px-2 py-0.5 rounded-full border transition-colors',
-                      isDone ? 'bg-green-100 border-green-300 text-green-700 line-through' : 'border-slate-200 text-slate-600 hover:border-green-300'
-                    )}
-                  >
-                    {isDone ? `✓ ${ht.title}` : `○ ${ht.title}`}
-                  </button>
-                )
-              })}
-            </div>
-          )}
+        <div className="space-y-4">
+          {renderTodaySection('today-large-tasks', '大任务', '今天需要推进的重点事项', todayLargeTasks)}
+          <div className="border-t border-slate-100" />
+          {renderTodaySection('today-habits', '习惯与固定任务', '今天需要完成的重复行动', todayHabitTasks)}
         </div>
 
-        {/* 今日任务统一排序 */}
-        {allTodaySorted.length === 0 ? (
-          <p className="text-sm text-slate-400 text-center py-2">今日暂无任务</p>
-        ) : (
-          <div>
-            {/* 未完成任务 */}
-            {incompleteToday.length > 0 && (
-              <div className="space-y-1.5">
-                {incompleteToday.map((task, i) => {
-                  const pr = priorityResults.find(r => r.taskId === task!.id)
-                  return (
-                    <div key={task!.id} className="flex items-center gap-2 p-2 rounded-lg hover:bg-slate-50 group">
-                      <span className={cn(
-                        'w-6 h-6 rounded-full text-xs font-bold flex items-center justify-center flex-shrink-0',
-                        i === 0 ? 'bg-red-100 text-red-700' :
-                        i === 1 ? 'bg-orange-100 text-orange-700' :
-                        'bg-blue-100 text-blue-700'
-                      )}>
-                        {i + 1}
-                      </span>
-                      <div className="flex-1 min-w-0">
-                        <p className="text-sm text-slate-700 truncate">
-                          {task!.title}
-                          {task!.isHabit && <span className="ml-1 text-[10px] text-green-600 font-normal">固定</span>}
-                        </p>
-                        {pr && <p className="text-xs text-slate-400">{pr.reason}</p>}
-                      </div>
-                      {pr && (
-                        <span className={cn(
-                          'badge text-[10px] flex-shrink-0',
-                          pr.level === 'P0' ? 'badge-p0' :
-                          pr.level === 'P1' ? 'badge-p1' :
-                          pr.level === 'P2' ? 'badge-p2' : 'badge-p3'
-                        )}>
-                          {pr.level} · {pr.score}分
-                        </span>
-                      )}
-                      <div className="flex items-center gap-1 flex-shrink-0">
-                        <button
-                          onClick={async () => {
-                            const { db } = await import('@/storage/db')
-                            await db.completionRecords.add({
-                              id: generateId(),
-                              taskId: task!.id, completedDate: todayStr,
-                              completedAt: new Date().toISOString(),
-                              status: 'completed',
-                              energyCostSnapshot: getEnergyCost({ energyDemand: task!.energyDemand }),
-                              taskTitleSnapshot: task!.title, projectIdSnapshot: task!.projectId,
-                              createdAt: new Date().toISOString(),
-                            })
-                            const repo = new DexieTaskRepository()
-                            await repo.update(task!.id, { status: 'done' as const, completedAt: new Date().toISOString() })
-                            await refreshData()
-                          }}
-                          className="btn-ghost text-[10px] py-0.5 px-1.5"
-                        >
-                          完成
-                        </button>
-                        <button
-                          onClick={() => {
-                            const d = document.getElementById(`defer2-${task!.id}`) as HTMLInputElement
-                            if (d) { d.showPicker(); return }
-                            const input = document.createElement('input')
-                            input.type = 'date'
-                            input.id = `defer2-${task!.id}`
-                            input.style.cssText = 'position:absolute;opacity:0;pointer-events:none'
-                            document.body.appendChild(input)
-                            input.addEventListener('change', async () => {
-                              if (!input.value) return
-                              const repo = new DexieTaskRepository()
-                              await repo.update(task!.id, { plannedDate: input.value, dueDate: undefined as any })
-                              await refreshData()
-                              document.body.removeChild(input)
-                            })
-                            input.showPicker()
-                          }}
-                          className="btn-ghost text-[10px] py-0.5 px-1.5"
-                        >
-                          延期
-                        </button>
-                      </div>
-                    </div>
-                  )
-                })}
-              </div>
-            )}
-
-            {/* 已完成任务 */}
-            {completedTodaySorted.length > 0 && (
-              <div className="mt-3 pt-2 border-t border-slate-100">
-                <p className="text-[11px] font-medium text-slate-400 mb-1">
-                  已完成（{completedTodaySorted.length}）
-                </p>
-                <div className="space-y-1">
-                  {completedTodaySorted.map(task => (
-                    <div key={task!.id} className="flex items-center gap-2 p-1.5 rounded text-xs text-slate-400 line-through hover:bg-slate-50">
-                      <span className="w-5 text-green-500 flex-shrink-0">✓</span>
-                      <span className="flex-1 truncate">{task!.title}</span>
-                      <button
-                        onClick={async () => {
-                          const { db } = await import('@/storage/db')
-                          const rec = await db.completionRecords
-                            .where({ taskId: task!.id, completedDate: todayStr, status: 'completed' as const })
-                            .first()
-                          if (rec) await db.completionRecords.delete(rec.id)
-                          const repo = new DexieTaskRepository()
-                          await repo.update(task!.id, { status: 'todo' as const, completedAt: null as any })
-                          await refreshData()
-                        }}
-                        className="btn-ghost text-[10px] py-0.5 px-1.5 text-slate-400 hover:text-blue-500"
-                      >
-                        撤回
-                      </button>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
-          </div>
-        )}
       </div>
 
       {/* 未排期任务 */}
@@ -830,141 +714,6 @@ export function DashboardPage() {
                 查看全部 {unscheduledTasks.length} 个任务
               </button>
             )}
-          </div>
-        </div>
-      )}
-
-      {/* 活跃项目（短期目标追踪） */}
-      {projects.length > 0 && (
-        <div className="card">
-          <div className="flex items-center justify-between mb-3">
-            <h2 className="font-semibold text-slate-800 flex items-center gap-2">
-              <FolderKanban size={18} className="text-blue-500" />
-              活跃项目 ({projects.length})
-            </h2>
-            <button onClick={() => setShowAllProjects(!showAllProjects)} className="btn-ghost text-xs flex items-center gap-1">
-              {showAllProjects ? '收起' : '查看全部'} <ChevronRight size={12} className={showAllProjects ? 'rotate-90' : ''} />
-            </button>
-          </div>
-          <div className="space-y-2">
-            {(showAllProjects ? projects : projects.slice(0, 3)).map(p => {
-              const isExpanded = expandedProjectId === p.id
-              const logs = (projectDailyLogs[p.id] || []).sort((a: any, b: any) => b.date.localeCompare(a.date))
-              const isCompleted = p.status === 'completed'
-              return (
-                <div key={p.id}>
-                  {/* 项目卡片 */}
-                  <div
-                    className="flex items-center justify-between p-2 rounded-lg hover:bg-slate-50 cursor-pointer"
-                    onClick={() => setExpandedProjectId(isExpanded ? null : p.id)}
-                  >
-                    <div className="flex items-center gap-2 min-w-0">
-                      <div className="w-3 h-3 rounded-full flex-shrink-0" style={{ backgroundColor: p.color }} />
-                      <span className={cn('text-sm truncate', isCompleted ? 'text-slate-400 line-through' : 'text-slate-700')}>
-                        {p.name}
-                      </span>
-                      {p.startDate && <span className="text-[10px] text-slate-400 flex-shrink-0">{p.startDate}</span>}
-                    </div>
-                    <div className="flex items-center gap-2 flex-shrink-0">
-                      <div className="w-12 h-1 bg-slate-100 rounded-full overflow-hidden">
-                        <div className="h-full rounded-full transition-all" style={{ width: `${p.progress}%`, backgroundColor: p.color }} />
-                      </div>
-                      <span className="text-[10px] text-slate-400">{p.progress}%</span>
-                    </div>
-                  </div>
-
-                  {/* 展开的项目详情 */}
-                  {isExpanded && (
-                    <div className="mt-1 p-3 rounded-lg bg-white border border-slate-200 space-y-3">
-                      {/* 状态信息 */}
-                      <div className="flex items-center gap-4 text-[10px] text-slate-500">
-                        {p.startDate && <span>开始: {p.startDate}</span>}
-                        {p.completedAt && <span>完成: {p.completedAt}</span>}
-                        <span className={p.status === 'active' ? 'text-blue-500' : 'text-green-500'}>
-                          {p.status === 'active' ? '进行中' : '已完成'}
-                        </span>
-                      </div>
-
-                      {/* 手动记录输入 */}
-                      {!isCompleted && (
-                        <div className="flex gap-2">
-                          <input
-                            className="input text-xs flex-1"
-                            placeholder="记录今天的进展……"
-                            value={projectLogInput}
-                            onChange={e => setProjectLogInput(e.target.value)}
-                            onKeyDown={async e => {
-                              if (e.key === 'Enter' && projectLogInput.trim()) {
-                                const { db } = await import('@/storage/db')
-                                const genId = crypto.randomUUID(); const ts = new Date().toISOString()
-                                await db.projectDailyLogs.put({
-                                  id: genId, projectId: p.id, date: todayStr, source: 'manual',
-                                  summary: projectLogInput.trim(), tasksCompleted: 0, tasksCreated: 0, focusMinutes: 0,
-                                  createdAt: ts, updatedAt: ts,
-                                })
-                                setProjectLogInput('')
-                                const updated = await db.projectDailyLogs.toArray()
-                                const grouped = { ...projectDailyLogs }
-                                for (const log of updated) {
-                                  if (!grouped[log.projectId]) grouped[log.projectId] = []
-                                  const idx = grouped[log.projectId].findIndex((l: any) => l.id === log.id)
-                                  if (idx >= 0) grouped[log.projectId][idx] = log
-                                  else grouped[log.projectId].push(log)
-                                }
-                                setProjectDailyLogs(grouped)
-                              }
-                            }}
-                          />
-                        </div>
-                      )}
-
-                      {/* 完成项目按钮 */}
-                      {!isCompleted && (
-                        <button
-                          onClick={async () => {
-                            if (!confirm(`确定完成项目"${p.name}"吗？`)) return
-                            const repo = new DexieProjectRepository()
-                            await repo.update(p.id, { status: 'completed', completedAt: todayStr } as any)
-                            await refreshData()
-                            setExpandedProjectId(null)
-                          }}
-                          className="btn-success text-xs py-1 px-2.5"
-                        >
-                          完成项目
-                        </button>
-                      )}
-
-                      {/* 时间线 */}
-                      {logs.length > 0 && (
-                        <div className="border-t border-slate-100 pt-2">
-                          <p className="text-[10px] text-slate-400 mb-1">每日进展</p>
-                          <div className="space-y-1.5 max-h-48 overflow-y-auto">
-                            {logs.map((log: any) => (
-                              <div key={log.id} className="text-[10px]">
-                                <span className="text-slate-400">{log.date}</span>
-                                <span className={cn(
-                                  'ml-1 px-1 rounded text-[9px]',
-                                  log.source === 'manual' ? 'bg-blue-50 text-blue-600' : 'bg-slate-100 text-slate-400'
-                                )}>
-                                  {log.source === 'manual' ? '手动' : '自动'}
-                                </span>
-                                <p className="text-slate-600 mt-0.5 ml-0">{log.summary}</p>
-                                {(log.tasksCompleted > 0 || log.focusMinutes > 0) && (
-                                  <p className="text-slate-400 mt-0.5">
-                                    {log.tasksCompleted > 0 && `完成${log.tasksCompleted}任务 `}
-                                    {log.focusMinutes > 0 && `专注${log.focusMinutes}分`}
-                                  </p>
-                                )}
-                              </div>
-                            ))}
-                          </div>
-                        </div>
-                      )}
-                    </div>
-                  )}
-                </div>
-              )
-            })}
           </div>
         </div>
       )}

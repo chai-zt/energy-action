@@ -1,7 +1,7 @@
 // ============================================================
 // Task Decomposition Service — AI 拆解 + 保存 Child Tasks
 //
-// 链路：decomposeTask → Harness(task-decompose-v1) → Harness(minimum-action-v1)
+// 链路：decomposeTask → Harness(task-decompose-v2) → Harness(minimum-action-v2)
 //        → 构建 child tasks + minimum actions → SQLite atomic transaction
 //
 // 外部行为（HTTP API / 返回结构 / 幂等）保持与旧 OpenAI 版本一致。
@@ -9,10 +9,11 @@
 
 import { readTasks, readMinActions, readDecompositions, readProjects, atomicWriteAll, type DecompositionRecord } from '../dataStore.ts'
 import { runSkill } from '../ai/harness.ts'
-import { taskDecomposeV1, type TaskDecomposeOutput } from '../ai/skills/taskDecomposeV1.ts'
-import { minimumActionV1, type MinimumActionOutput } from '../ai/skills/minimumActionV1.ts'
+import { taskDecomposeV2, type TaskDecomposeOutputV2 } from '../ai/skills/taskDecomposeV2.ts'
+import { minimumActionV2, type MinimumActionOutputV2 } from '../ai/skills/minimumActionV2.ts'
 import { setProvider, type AiJsonProvider } from '../ai/providers/mimoProvider.ts'
 import type { MinimumAction, Task } from '../../src/domain/models.ts'
+import type { EnergyLevel } from '../../src/domain/models.ts'
 
 // 测试接缝：注入 fake MiMo provider
 export { setProvider }
@@ -99,7 +100,7 @@ function loadCompletedDecomposition(taskId: string): DecompositionSaveResult | n
 
 // === Core ===
 
-export async function decomposeTask(taskId: string): Promise<DecompositionSaveResult> {
+export async function decomposeTask(taskId: string, energyLevel: EnergyLevel = 'medium'): Promise<DecompositionSaveResult> {
   // 幂等：已成功拆解 → 返回已有结果
   const cached = loadCompletedDecomposition(taskId)
   if (cached) return cached
@@ -111,8 +112,8 @@ export async function decomposeTask(taskId: string): Promise<DecompositionSaveRe
 
   const input = { title: parent.title, description: parent.description || '' }
 
-  // 1. AI 拆解（task-decompose-v1）—— 网络调用，不在 SQLite 事务内
-  const decomposeOutput: TaskDecomposeOutput = await runSkill(taskDecomposeV1, {
+  // 1. AI 拆解（task-decompose-v2）—— 网络调用，不在 SQLite 事务内
+  const decomposeOutput: TaskDecomposeOutputV2 = await runSkill(taskDecomposeV2, {
     title: parent.title,
     description: parent.description || '',
     estimatedMinutes: parent.estimatedMinutes,
@@ -120,15 +121,22 @@ export async function decomposeTask(taskId: string): Promise<DecompositionSaveRe
     energyDemand: parent.energyDemand,
   })
 
-  // 2. 最小行动（minimum-action-v1，批量一次）—— 网络调用，不在事务内
+  // 2. 最小行动（minimum-action-v2，批量一次）—— 网络调用，不在事务内
   const targets = decomposeOutput.shouldDecompose
-    ? decomposeOutput.children.map((c, i) => ({ taskRef: `child-${i}`, title: c.title, description: c.description }))
-    : [{ taskRef: 'parent', title: parent.title, description: parent.description || '' }]
+    ? decomposeOutput.children.map((c, i) => ({ taskRef: `child-${i}`, title: c.title, description: c.description, stageType: c.stageType }))
+    : [{ taskRef: 'parent', title: parent.title, description: parent.description || '', stageType: 'activation' as const }]
 
-  const actionOutput: MinimumActionOutput = await runSkill(minimumActionV1, {
-    tasks: targets,
-    energyLevel: 'medium',
-  })
+  // Minimum Action 是非阻塞附加信息：阶段拆解成功时，即使动作生成失败也要保留 Child Tasks。
+  // ponytail: 先接受可用动作，后续再做独立的动作质量优化，不让附加字段阻断主流程。
+  let actionOutput: MinimumActionOutputV2 = { actions: [] }
+  try {
+    actionOutput = await runSkill(minimumActionV2, {
+      tasks: targets,
+      energyLevel,
+    })
+  } catch {
+    actionOutput = { actions: [] }
+  }
   const actionByRef = new Map(actionOutput.actions.map(a => [a.taskRef, a]))
 
   // 3. 构建 child tasks + minimum actions（仅在内存，尚未写入）
@@ -196,8 +204,8 @@ export async function decomposeTask(taskId: string): Promise<DecompositionSaveRe
     decomposition: decomposeOutput,
     minimumActions: actionOutput,
     skills: {
-      decompose: { id: taskDecomposeV1.id, version: taskDecomposeV1.version },
-      minimumAction: { id: minimumActionV1.id, version: minimumActionV1.version },
+      decompose: { id: taskDecomposeV2.id, version: taskDecomposeV2.version },
+      minimumAction: { id: minimumActionV2.id, version: minimumActionV2.version },
     },
     model: (process.env.MIMO_MODEL || DEFAULT_MODEL),
   }

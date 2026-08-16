@@ -81,7 +81,7 @@ export async function seedDataIfEmpty(): Promise<void> {
   const q3Goal: Goal = {
     id: generateId(),
     title: '2026 Q3 建立个人效率系统',
-    description: '完成 Personal AI OS MVP 开发，建立每日执行和复盘习惯',
+    description: '完成 Energy Action MVP 开发，建立每日执行和复盘习惯',
     level: 'quarterly',
     parentGoalId: yearlyGoal.id,
     startDate: '2026-07-01',
@@ -151,7 +151,7 @@ export async function seedDataIfEmpty(): Promise<void> {
   // --- 项目 ---
   const project: Project = {
     id: generateId(),
-    name: 'Personal AI OS 开发',
+    name: 'Energy Action 开发',
     description: '开发个人 AI 工作操作系统 V0.1',
     goalId: q3Goal.id,
     keyResultId: kr1.id,

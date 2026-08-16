@@ -9,7 +9,7 @@ import {
   type DragEndEvent,
 } from '@dnd-kit/core'
 import {
-  ChevronLeft, ChevronRight, ListTree, CheckSquare,
+  ChevronLeft, ChevronRight, ListTree,
   Plus, X, Clock, ChevronDown, ChevronUp, Zap, Timer, BookOpen,
   Calendar, Target as CheckCircleIcon,
 } from 'lucide-react'
@@ -74,7 +74,7 @@ export function CompactMonth({
           ><ChevronRight size={14} /></button>
         </div>
       </div>
-      <div className="grid grid-cols-7 gap-1 text-center text-[10px] text-slate-400 mb-1">
+      <div className="grid grid-cols-7 gap-1 text-center text-[11px] text-slate-400 mb-1">
         {['一', '二', '三', '四', '五', '六', '日'].map(d => (
           <div key={d} className="py-0.5">{d}</div>
         ))}
@@ -144,14 +144,16 @@ export function MonthDayCell({
         isOver && !isSelected && 'ring-2 ring-amber-400 ring-offset-1 bg-amber-50 border-2 border-dashed border-amber-300'
       )}
     >
-      <span className="leading-none">{date.getDate()}</span>
+      <span className="leading-none font-semibold text-[11px]">{date.getDate()}</span>
       {taskCount > 0 && isCurrentMonth && (
         <span className={cn(
-          'flex items-center gap-0.5 text-[8px] mt-0.5 leading-none',
-          isSelected ? 'text-white' : isToday ? 'text-blue-600' : 'text-slate-500'
+          'mt-1 text-[10px] font-semibold leading-none px-1 rounded-full',
+          isSelected ? 'bg-white/25 text-white' :
+          allDone ? 'bg-emerald-100 text-emerald-600' :
+          isToday ? 'bg-blue-200/70 text-blue-700' :
+          'bg-slate-100 text-slate-600'
         )}>
-          {allDone ? <CheckSquare size={7} /> : <ListTree size={7} />}
-          <span className="font-medium">{displayCount}</span>
+          {displayCount}
         </span>
       )}
     </button>
@@ -477,12 +479,12 @@ export function DraggableTaskItem({
         <div className="flex items-center gap-1.5 mt-0.5 flex-wrap">
           {task.isHabit && <span className="badge badge-success text-[9px]">习惯</span>}
           {task.estimatedMinutes > 0 && (
-            <span className="text-[10px] text-slate-400">
+            <span className="text-[11px] text-slate-400">
               <Clock size={8} className="inline" />{task.estimatedMinutes}分
             </span>
           )}
           {task.plannedDate && (
-            <span className="text-[10px] text-blue-500">📅 {task.plannedDate}</span>
+            <span className="text-[11px] text-blue-500">📅 {task.plannedDate}</span>
           )}
         </div>
       </div>

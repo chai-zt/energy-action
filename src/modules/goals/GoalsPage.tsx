@@ -220,7 +220,7 @@ export function GoalsPage() {
           <div>
             <label className="label">我想做到什么？</label>
             <input className="input" value={newName} onChange={e => setNewName(e.target.value)}
-              placeholder="例如：完成 Personal AI OS 第一版并开始内测" autoFocus />
+              placeholder="例如：完成 Energy Action 第一版并开始内测" autoFocus />
           </div>
           <div>
             <label className="label">目标周期</label>

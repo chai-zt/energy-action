@@ -53,7 +53,7 @@ export function SettingsPage() {
       const url = URL.createObjectURL(blob)
       const a = document.createElement('a')
       a.href = url
-      a.download = `personal-ai-os-backup-${new Date().toISOString().split('T')[0]}.json`
+      a.download = `energy-action-backup-${new Date().toISOString().split('T')[0]}.json`
       a.click()
       URL.revokeObjectURL(url)
       setMessage('数据已导出')

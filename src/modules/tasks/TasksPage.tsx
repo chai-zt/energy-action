@@ -7,7 +7,7 @@ import {
 import {
   Plus, CheckSquare, Inbox, CalendarDays, List, Search, Tag as TagIcon,
   X, ChevronLeft, ChevronRight, ChevronDown, ChevronUp, Clock,
-  CheckCircle2, ListTree, Trash2, RotateCcw, Zap, Timer, BookOpen, Edit2, Activity, Loader2,
+  CheckCircle2, ListTree, Trash2, RotateCcw, RefreshCw, Zap, Timer, BookOpen, Edit2, Activity, Loader2,
 } from 'lucide-react'
 import {
   DexieTaskRepository, DexieTagRepository,
@@ -21,9 +21,11 @@ import {
 } from '@/lib/utils'
 import { shouldExecuteOnDate } from '@/services/recurrenceEngine'
 import { getEnergyCost, calcPlannedEnergy } from '@/services/energyService'
-import { createTask as apiCreateTask, decomposeTask as apiDecomposeTask, getChildTasks as apiGetChildTasks, getMinimumAction as apiGetMinimumAction, getRecycledTasks as apiGetRecycledTasks, moveTask as apiMoveTask, restoreTask as apiRestoreTask, softDeleteTask as apiSoftDeleteTask, updateMinAction as apiUpdateMinAction, type RecycledTask } from '@/services/apiClient'
+import { getActionCoins } from '@/services/rewardService'
+import { createTask as apiCreateTask, decomposeTask as apiDecomposeTask, getChildTasks as apiGetChildTasks, getMinimumAction as apiGetMinimumAction, getRecycledTasks as apiGetRecycledTasks, moveTask as apiMoveTask, restoreTask as apiRestoreTask, softDeleteTask as apiSoftDeleteTask, updateMinAction as apiUpdateMinAction, regenerateMinimumAction as apiRegenerateMinimumAction, type RecycledTask } from '@/services/apiClient'
 import { DexieExecutionStepRepository, DexieMinimumActionRepository } from '@/storage/repositories'
 import { getAiStatus } from '@/services/aiConfigApi'
+import { getCurrentEnergy } from '@/services/currentEnergy'
 import { AiModelConfigForm } from '@/components/AiModelConfigForm'
 import type {
   Task, Tag, CognitiveLoad, DailyState, DailyReview,
@@ -94,12 +96,14 @@ export function TasksPage() {
   const [dayTimeRecords, setDayTimeRecords] = useState<TimeRecord[]>([])
   const [dayPomodoros, setDayPomodoros] = useState<PomodoroSession[]>([])
   const [dayCompletions, setDayCompletions] = useState<CompletionRecord[]>([])
+  const [allCompletions, setAllCompletions] = useState<CompletionRecord[]>([])
   const [showDone, setShowDone] = useState(false)
   const [showStatePanel, setShowStatePanel] = useState(false)
   const [mobileTab, setMobileTab] = useState<'tasks' | 'calendar'>('tasks')
 
   const taskRepo = new DexieTaskRepository()
   const tagRepo = new DexieTagRepository()
+  const completionRepo = new DexieCompletionRepository()
   const hasChildren = useCallback(
     (taskId: string) => tasks.some(task => task.parentTaskId === taskId && !task.deletedAt),
     [tasks],
@@ -155,22 +159,54 @@ export function TasksPage() {
 
   useEffect(() => { void refreshAiStatus() }, [refreshAiStatus])
 
+  const ensureAiAvailable = async (): Promise<boolean> => {
+    try {
+      const status = await getAiStatus()
+      setAiAvailable(status.available)
+      return status.available
+    } catch {
+      setAiAvailable(false)
+      return false
+    }
+  }
+
   const startDecomposition = async (taskId: string) => {
-    // AI 不可用 → 不调用 Provider / 不发网络请求，统一打开配置提示
-    if (!aiAvailable) {
+    // 以点击时的后端状态为准，避免页面挂载时的旧状态误判。
+    if (!(await ensureAiAvailable())) {
       setConfigPromptOpen(true)
       return
     }
     setDecompState(previous => ({ ...previous, [taskId]: 'generating' }))
     try {
-      await apiDecomposeTask(taskId)
+      // 传入用户当前真实精力（不再固定 medium）
+      await apiDecomposeTask(taskId, getCurrentEnergy())
       await Promise.all([loadTaskNode(taskId), loadAll()])
       setDecompState(previous => ({ ...previous, [taskId]: 'completed' }))
       setExpandedTaskIds(previous => previous.includes(taskId) ? previous : [...previous, taskId])
     } catch (error) {
       console.error('Decompose failed:', error)
       setDecompState(previous => ({ ...previous, [taskId]: 'failed' }))
-      showToast('AI 拆解失败，已保留大任务；你可以手动添加小任务。')
+      const detail = error instanceof Error ? error.message : '未知错误'
+      showToast(`AI 拆解失败：${detail}；大任务已保留。`)
+    }
+  }
+
+  const regenerateMinimumAction = async (taskId: string) => {
+    // 以点击时的后端状态为准，避免页面挂载时的旧状态误判。
+    if (!(await ensureAiAvailable())) {
+      setConfigPromptOpen(true)
+      return
+    }
+    setDecompState(previous => ({ ...previous, [taskId]: 'generating' }))
+    try {
+      // 只重新生成最小行动（不重新拆解），传入当前真实精力
+      await apiRegenerateMinimumAction(taskId, getCurrentEnergy())
+      await loadTaskNode(taskId)
+      setDecompState(previous => ({ ...previous, [taskId]: 'completed' }))
+    } catch (error) {
+      console.error('Regenerate minimum action failed:', error)
+      setDecompState(previous => ({ ...previous, [taskId]: 'failed' }))
+      showToast('最小行动生成失败，请稍后重试。')
     }
   }
 
@@ -245,12 +281,20 @@ export function TasksPage() {
   const loadAll = useCallback(async () => {
     try {
       setLoadError(null)
-      const [allTasks, allTags] = await Promise.all([
-        taskRepo.getAll(),
-        tagRepo.getAll(),
+      const allTasks = await taskRepo.getAll()
+      const [allTags, allCompletionRecords] = await Promise.all([
+        tagRepo.getAll().catch(error => {
+          console.warn('标签数据暂时不可用:', error)
+          return []
+        }),
+        completionRepo.getAll().catch(error => {
+          console.warn('完成记录暂时不可用:', error)
+          return []
+        }),
       ])
       setTasks(allTasks.sort((a, b) => b.createdAt.localeCompare(a.createdAt)))
       setTags(allTags)
+      setAllCompletions(allCompletionRecords)
     } catch (error) {
       console.error('加载任务失败:', error)
       setLoadError(taskCopy.loadFailed)
@@ -266,13 +310,13 @@ export function TasksPage() {
     const pomoRepo = new DexiePomodoroRepository()
     const compRepo = new DexieCompletionRepository()
 
-    const [dateTasks, state, review, timeRecs, pomos, comps] = await Promise.all([
-      taskRepo.getByPlannedDate(date),
-      stateRepo.getByDate(date),
-      reviewRepo.getByDate(date),
-      timeRepo.getByDate(date),
-      pomoRepo.getByDate(date),
-      compRepo.getByDate(date),
+    const dateTasks = await taskRepo.getByPlannedDate(date)
+    const [state, review, timeRecs, pomos, comps] = await Promise.all([
+      stateRepo.getByDate(date).catch(() => undefined),
+      reviewRepo.getByDate(date).catch(() => undefined),
+      timeRepo.getByDate(date).catch(() => []),
+      pomoRepo.getByDate(date).catch(() => []),
+      compRepo.getByDate(date).catch(() => []),
     ])
 
     setDayTasks(dateTasks)
@@ -341,61 +385,67 @@ export function TasksPage() {
   }
 
   // 任务操作
-  const handleToggleStatus = async (task: Task) => {
-    const { db } = await import('@/storage/db')
+  const handleToggleStatus = async (task: Task, completionDate = today()) => {
+    const records = await completionRepo.getByTaskId(task.id)
     if (task.isHabit) {
-      // 固定任务：检查今天是否已有记录
-      const todayStr = today()
-      const existing = await db.completionRecords
-        .where({ taskId: task.id, completedDate: todayStr, status: 'completed' as const })
-        .first()
+      // 固定任务：按完成日期检查是否已有记录
+      const existing = records.find(record => record.completedDate === completionDate && record.status === 'completed')
       if (existing) {
         // 取消完成
-        await db.completionRecords.delete(existing.id)
+        await completionRepo.delete(existing.id)
+        showToast(`已取消“${task.title}”，行动币 -${existing.rewardPoints ?? 1}`)
       } else {
         // 完成
-        await db.completionRecords.add({
+        await completionRepo.create({
           id: generateId(),
           taskId: task.id,
-          completedDate: todayStr,
+          completedDate: completionDate,
           completedAt: now(),
           status: 'completed' as const,
           energyCostSnapshot: getEnergyCost({ energyDemand: task.energyDemand }),
+          rewardPoints: 1,
           taskTitleSnapshot: task.title,
           projectIdSnapshot: task.projectId,
           createdAt: now(),
         })
+        showToast(`完成习惯“${task.title}”，行动币 +1`)
       }
     } else {
       const newStatus = task.status === 'done' ? 'todo' : 'done'
-      const todayStr = today()
       if (newStatus === 'done') {
         // 完成普通任务：创建 CompletionRecord 并扣除精力
-        await db.completionRecords.add({
+        await completionRepo.create({
           id: generateId(),
           taskId: task.id,
-          completedDate: todayStr,
+          completedDate: completionDate,
           completedAt: now(),
           status: 'completed' as const,
           energyCostSnapshot: getEnergyCost({ energyDemand: task.energyDemand }),
+          rewardPoints: 1,
           taskTitleSnapshot: task.title,
           projectIdSnapshot: task.projectId,
           createdAt: now(),
         })
+        showToast(`完成任务“${task.title}”，行动币 +1`)
       } else {
         // 取消完成：删除 CompletionRecord 返还精力
-        const existing = await db.completionRecords
-          .where({ taskId: task.id, completedDate: todayStr, status: 'completed' as const })
-          .first()
-        if (existing) await db.completionRecords.delete(existing.id)
+        const existing = records.find(record => record.completedDate === completionDate && record.status === 'completed')
+        if (existing) {
+          await completionRepo.delete(existing.id)
+          showToast(`已取消“${task.title}”，行动币 -${existing.rewardPoints ?? 1}`)
+        }
       }
       await taskRepo.update(task.id, {
         status: newStatus,
         completedAt: newStatus === 'done' ? now() : null,
       })
     }
-    loadAll()
-    loadDayDetails(selectedDate)
+    await Promise.all([loadAll(), loadDayDetails(selectedDate)])
+  }
+
+  const handleToggleTreeTaskStatus = async (task: Task) => {
+    await handleToggleStatus(task)
+    if (task.parentTaskId) await loadTaskNode(task.parentTaskId)
   }
 
   const handleCancelSchedule = async (task: Task) => {
@@ -470,13 +520,32 @@ export function TasksPage() {
   }), [leftTasks, isLargeTask])
   const smallAndHabitTasks = useMemo(() => leftTasks.filter(task => !isLargeTask(task)), [leftTasks, isLargeTask])
 
+  const completedHabitIdsToday = useMemo(() => new Set(
+    allCompletions
+      .filter(record => record.status === 'completed' && record.completedDate === today())
+      .map(record => record.taskId),
+  ), [allCompletions])
+  const completedHabitIdsSelected = useMemo(() => new Set(
+    dayCompletions
+      .filter(record => record.status === 'completed')
+      .map(record => record.taskId),
+  ), [dayCompletions])
+  const isTaskCompletedToday = useCallback(
+    (task: Task) => task.status === 'done' || (task.isHabit && completedHabitIdsToday.has(task.id)),
+    [completedHabitIdsToday],
+  )
+  const isTaskCompletedSelected = useCallback(
+    (task: Task) => task.status === 'done' || (task.isHabit && completedHabitIdsSelected.has(task.id)),
+    [completedHabitIdsSelected],
+  )
+
   // 当天任务分组
   const dayTasksByStatus = useMemo(() => {
-    const doing = dayTasks.filter(t => t.status === 'doing')
-    const todo = dayTasks.filter(t => t.status === 'todo' || t.status === 'inbox')
-    const done = dayTasks.filter(t => t.status === 'done')
+    const doing = dayTasks.filter(t => !isTaskCompletedSelected(t) && t.status === 'doing')
+    const todo = dayTasks.filter(t => !isTaskCompletedSelected(t) && (t.status === 'todo' || t.status === 'inbox'))
+    const done = dayTasks.filter(isTaskCompletedSelected)
     return { doing, todo, done }
-  }, [dayTasks])
+  }, [dayTasks, isTaskCompletedSelected])
 
   // 摘要
   const summary = useMemo(() => {
@@ -487,6 +556,11 @@ export function TasksPage() {
     const actualMin = dayTimeRecords.reduce((s, r) => s + (r.durationMinutes || 0), 0)
     return { total, done, undone, plannedMin, actualMin }
   }, [dayTasks, dayTasksByStatus, dayTimeRecords])
+  const totalActionCoins = useMemo(() => getActionCoins(allCompletions), [allCompletions])
+  const todayActionCoins = useMemo(
+    () => getActionCoins(allCompletions.filter(record => record.completedDate === today())),
+    [allCompletions],
+  )
 
   if (loading) {
     return (
@@ -518,12 +592,15 @@ export function TasksPage() {
       onDragEnd={handleDragEnd}
       onDragCancel={handleDragCancel}
     >
-      <div className="max-w-full mx-auto space-y-3">
+      <div className="max-w-full mx-auto flex flex-col gap-3 md:h-[calc(100vh-3rem)]">
         {/* 顶部标题 + 移动端切换 */}
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-3">
             <CheckSquare size={24} className="text-blue-500" />
             <h1 className="text-xl font-bold text-slate-800">任务管理</h1>
+            <span className="inline-flex items-center gap-1 rounded-full bg-amber-50 px-2 py-1 text-xs font-medium text-amber-700" title="完成任务获得行动币">
+              <Zap size={12} /> 行动币 {totalActionCoins} <span className="text-amber-500">(今日 +{todayActionCoins})</span>
+            </span>
           </div>
           <div className="flex items-center gap-2">
             {/* 移动端 Tab 切换 */}
@@ -553,18 +630,18 @@ export function TasksPage() {
           </div>
         )}
         {toast && (
-          <div className="bg-green-50 border border-green-200 rounded-lg px-3 py-2 text-sm text-green-700">
+          <div role="status" aria-live="polite" className="bg-green-50 border border-green-200 rounded-lg px-3 py-2 text-sm text-green-700 animate-[fadeIn_180ms_ease-out]">
             {toast}
           </div>
         )}
 
-        <div className="grid grid-cols-1 md:grid-cols-12 gap-4">
+        <div className="grid grid-cols-1 md:grid-cols-12 gap-4 md:flex-1 md:min-h-0">
           {/* 左侧：任务管理区 */}
           <div className={cn(
-            'md:col-span-7 space-y-3 h-full',
+            'md:col-span-7 md:flex md:flex-col md:min-h-0',
             mobileTab === 'calendar' && 'hidden md:block'
           )}>
-            <div className="card h-full">
+            <div className="card flex flex-col flex-1 min-h-0">
               {/* 工具栏 */}
               <div className="flex items-center gap-2 flex-wrap mb-3">
                 <div className="flex bg-slate-100 rounded-lg p-0.5">
@@ -654,13 +731,13 @@ export function TasksPage() {
                   {search ? '没有匹配的任务' : '没有任务，把第一个任务拖到日历上吧'}
                 </p>
               ) : (
-                <div className="space-y-4 max-h-[calc(100vh-22rem)] overflow-y-auto">
+                <div className="space-y-4 flex-1 min-h-0 overflow-y-auto">
                   <TaskSection title={view === 'all' ? '大任务' : '任务'} tasks={view === 'all' ? largeTasks : leftTasks}>
-                      {task => <TaskRow key={task.id} task={task} onToggle={() => handleToggleStatus(task)} onDelete={() => requestDelete(task)} onEdit={() => setEditingTask(task)} onExpand={() => toggleExpand(task.id)} isExpanded={expandedTaskIds.includes(task.id)} isLarge={isLargeTask(task)} decompState={decompState[task.id]} childTasks={childTasks} minimumActions={minimumActions} legacySteps={legacyStepsByTask[task.id] || []} expandedTaskIds={expandedTaskIds} allDecompState={decompState} editingMA={editingMA} hasChildren={hasChildren} isLargeTask={isLargeTask} onToggleExpand={toggleExpand} onEditMinimumAction={setEditingMA} onSaveMinimumAction={handleMinActionSave} onCancelMinimumAction={() => setEditingMA(null)} onToggleStep={toggleStep} onEditTask={setEditingTask} onRequestDelete={requestDelete} onMoveTask={moveTask} onStartDecomposition={startDecomposition} />}
+                      {task => <TaskRow key={task.id} task={task} isCompleted={isTaskCompletedToday(task)} onToggle={() => handleToggleStatus(task)} onDelete={() => requestDelete(task)} onEdit={() => setEditingTask(task)} onExpand={() => toggleExpand(task.id)} isExpanded={expandedTaskIds.includes(task.id)} isLarge={isLargeTask(task)} decompState={decompState[task.id]} childTasks={childTasks} minimumActions={minimumActions} legacySteps={legacyStepsByTask[task.id] || []} expandedTaskIds={expandedTaskIds} allDecompState={decompState} editingMA={editingMA} hasChildren={hasChildren} isLargeTask={isLargeTask} onToggleExpand={toggleExpand} onToggleTaskStatus={handleToggleTreeTaskStatus} onEditMinimumAction={setEditingMA} onSaveMinimumAction={handleMinActionSave} onCancelMinimumAction={() => setEditingMA(null)} onToggleStep={toggleStep} onEditTask={setEditingTask} onRequestDelete={requestDelete} onMoveTask={moveTask} onStartDecomposition={startDecomposition} onRegenerateMinimumAction={regenerateMinimumAction} />}
                   </TaskSection>
                   {view === 'all' && (
                     <TaskSection title="小任务与习惯" tasks={smallAndHabitTasks}>
-                      {task => <TaskRow key={task.id} task={task} onToggle={() => handleToggleStatus(task)} onDelete={() => requestDelete(task)} onEdit={() => setEditingTask(task)} onExpand={() => toggleExpand(task.id)} isExpanded={expandedTaskIds.includes(task.id)} isLarge={false} decompState={decompState[task.id]} childTasks={childTasks} minimumActions={minimumActions} legacySteps={legacyStepsByTask[task.id] || []} expandedTaskIds={expandedTaskIds} allDecompState={decompState} editingMA={editingMA} hasChildren={hasChildren} isLargeTask={isLargeTask} onToggleExpand={toggleExpand} onEditMinimumAction={setEditingMA} onSaveMinimumAction={handleMinActionSave} onCancelMinimumAction={() => setEditingMA(null)} onToggleStep={toggleStep} onEditTask={setEditingTask} onRequestDelete={requestDelete} onMoveTask={moveTask} onStartDecomposition={startDecomposition} />}
+                      {task => <TaskRow key={task.id} task={task} isCompleted={isTaskCompletedToday(task)} onToggle={() => handleToggleStatus(task)} onDelete={() => requestDelete(task)} onEdit={() => setEditingTask(task)} onExpand={() => toggleExpand(task.id)} isExpanded={expandedTaskIds.includes(task.id)} isLarge={false} decompState={decompState[task.id]} childTasks={childTasks} minimumActions={minimumActions} legacySteps={legacyStepsByTask[task.id] || []} expandedTaskIds={expandedTaskIds} allDecompState={decompState} editingMA={editingMA} hasChildren={hasChildren} isLargeTask={isLargeTask} onToggleExpand={toggleExpand} onToggleTaskStatus={handleToggleTreeTaskStatus} onEditMinimumAction={setEditingMA} onSaveMinimumAction={handleMinActionSave} onCancelMinimumAction={() => setEditingMA(null)} onToggleStep={toggleStep} onEditTask={setEditingTask} onRequestDelete={requestDelete} onMoveTask={moveTask} onStartDecomposition={startDecomposition} onRegenerateMinimumAction={regenerateMinimumAction} />}
                     </TaskSection>
                   )}
                 </div>
@@ -671,10 +748,10 @@ export function TasksPage() {
 
           {/* 右侧：日历与当天安排 */}
           <div className={cn(
-            'md:col-span-5',
+            'md:col-span-5 h-full flex flex-col min-h-0',
             mobileTab === 'tasks' && 'hidden md:block'
           )}>
-            <div className="card">
+            <div className="card flex flex-col flex-1 min-h-0">
               {/* 当前选中日期头部 */}
               <div className="flex items-center justify-between mb-3">
                 <div>
@@ -778,7 +855,7 @@ export function TasksPage() {
               </div>
 
               {/* 当天任务列表 */}
-              <div className="mt-4 pt-3 border-t border-slate-100 max-h-[40vh] overflow-y-auto">
+              <div className="mt-4 pt-3 border-t border-slate-100 flex-1 min-h-0 overflow-y-auto">
                 <h3 className="text-xs font-semibold text-slate-600 mb-2">当天任务</h3>
                 {dayTasks.length === 0 ? (
                   <div className="text-center py-6 text-xs text-slate-400">
@@ -792,8 +869,8 @@ export function TasksPage() {
                       <GroupSection title="进行中" color="bg-blue-500">
                         {dayTasksByStatus.doing.map(t => (
                           <DayTaskRow
-                            key={t.id} task={t}
-                            onToggle={() => handleToggleStatus(t)}
+                            key={t.id} task={t} isCompleted={isTaskCompletedSelected(t)}
+                            onToggle={() => handleToggleStatus(t, selectedDate)}
                             onDelete={() => requestDelete(t)}
                             onUnschedule={() => handleCancelSchedule(t)}
                             onClick={() => setEditingTask(t)}
@@ -806,8 +883,8 @@ export function TasksPage() {
                       <GroupSection title="待完成" color="bg-orange-500">
                         {dayTasksByStatus.todo.map(t => (
                           <DayTaskRow
-                            key={t.id} task={t}
-                            onToggle={() => handleToggleStatus(t)}
+                            key={t.id} task={t} isCompleted={isTaskCompletedSelected(t)}
+                            onToggle={() => handleToggleStatus(t, selectedDate)}
                             onDelete={() => requestDelete(t)}
                             onUnschedule={() => handleCancelSchedule(t)}
                             onClick={() => setEditingTask(t)}
@@ -829,8 +906,8 @@ export function TasksPage() {
                           <GroupSection title="" color="bg-green-500">
                             {dayTasksByStatus.done.map(t => (
                               <DayTaskRow
-                                key={t.id} task={t}
-                                onToggle={() => handleToggleStatus(t)}
+                                key={t.id} task={t} isCompleted={isTaskCompletedSelected(t)}
+                                onToggle={() => handleToggleStatus(t, selectedDate)}
                                 onDelete={() => requestDelete(t)}
                                 onUnschedule={() => handleCancelSchedule(t)}
                                 onClick={() => setEditingTask(t)}
@@ -1064,6 +1141,7 @@ function RecycleBinModal({
 
 interface TaskRowProps {
   task: Task
+  isCompleted: boolean
   onToggle: () => void
   onDelete: () => void
   onEdit: () => void
@@ -1080,6 +1158,7 @@ interface TaskRowProps {
   hasChildren: (taskId: string) => boolean
   isLargeTask: (task: Task) => boolean
   onToggleExpand: (taskId: string) => void
+  onToggleTaskStatus: (task: Task) => void
   onEditMinimumAction: (editing: { taskId: string; value: string } | null) => void
   onSaveMinimumAction: () => void
   onCancelMinimumAction: () => void
@@ -1088,6 +1167,7 @@ interface TaskRowProps {
   onRequestDelete: (task: Task) => void
   onMoveTask: (task: Task, direction: 'up' | 'down') => void
   onStartDecomposition: (taskId: string) => void
+  onRegenerateMinimumAction: (taskId: string) => void
 }
 
 function TaskSection({ title, tasks, children }: { title: string; tasks: Task[]; children: (task: Task) => React.ReactNode }) {
@@ -1098,17 +1178,18 @@ function TaskSection({ title, tasks, children }: { title: string; tasks: Task[];
 }
 
 function TaskRow(props: TaskRowProps) {
-  const { task, onToggle, onDelete, onEdit, onExpand, isExpanded, isLarge, decompState, childTasks, minimumActions, legacySteps, expandedTaskIds, allDecompState, editingMA, hasChildren, isLargeTask, onToggleExpand, onEditMinimumAction, onSaveMinimumAction, onCancelMinimumAction, onToggleStep, onEditTask, onRequestDelete, onMoveTask, onStartDecomposition } = props
+  const { task, isCompleted, onToggle, onDelete, onEdit, onExpand, isExpanded, isLarge, decompState, childTasks, minimumActions, legacySteps, expandedTaskIds, allDecompState, editingMA, hasChildren, isLargeTask, onToggleExpand, onToggleTaskStatus, onEditMinimumAction, onSaveMinimumAction, onCancelMinimumAction, onToggleStep, onEditTask, onRequestDelete, onMoveTask, onStartDecomposition, onRegenerateMinimumAction } = props
   return <div>
-    <DraggableTask task={task} onToggle={onToggle} onDelete={onDelete} onClick={onEdit} onExpand={onExpand} isExpanded={isExpanded} isLarge={isLarge} decompState={decompState} />
-    {isExpanded && <TaskTreeDetails task={task} childTasks={childTasks} minimumActions={minimumActions} legacySteps={legacySteps} expandedTaskIds={expandedTaskIds} decompState={allDecompState} editingMA={editingMA} hasChildren={hasChildren} isLargeTask={isLargeTask} onToggleExpand={onToggleExpand} onEditMinimumAction={onEditMinimumAction} onSaveMinimumAction={onSaveMinimumAction} onCancelMinimumAction={onCancelMinimumAction} onToggleStep={onToggleStep} onEditTask={onEditTask} onRequestDelete={onRequestDelete} onMoveTask={onMoveTask} onStartDecomposition={onStartDecomposition} />}
+    <DraggableTask task={task} isCompleted={isCompleted} onToggle={onToggle} onDelete={onDelete} onClick={onEdit} onExpand={onExpand} isExpanded={isExpanded} isLarge={isLarge} decompState={decompState} />
+    {isExpanded && <TaskTreeDetails task={task} childTasks={childTasks} minimumActions={minimumActions} legacySteps={legacySteps} expandedTaskIds={expandedTaskIds} decompState={allDecompState} editingMA={editingMA} hasChildren={hasChildren} isLargeTask={isLargeTask} onToggleExpand={onToggleExpand} onToggleTaskStatus={onToggleTaskStatus} onEditMinimumAction={onEditMinimumAction} onSaveMinimumAction={onSaveMinimumAction} onCancelMinimumAction={onCancelMinimumAction} onToggleStep={onToggleStep} onEditTask={onEditTask} onRequestDelete={onRequestDelete} onMoveTask={onMoveTask} onStartDecomposition={onStartDecomposition} onRegenerateMinimumAction={onRegenerateMinimumAction} />}
   </div>
 }
 
 function DraggableTask({
-  task, onToggle, onDelete, onClick, onExpand, isExpanded, isLarge, decompState,
+  task, isCompleted, onToggle, onDelete, onClick, onExpand, isExpanded, isLarge, decompState,
 }: {
   task: Task
+  isCompleted: boolean
   onToggle: () => void
   onDelete: () => void
   onClick: () => void
@@ -1133,7 +1214,7 @@ function DraggableTask({
       className={cn(
         'flex items-center gap-2 p-2 rounded-lg hover:bg-slate-50 group touch-none',
         isDragging && 'opacity-30',
-        task.status === 'done' && 'opacity-60'
+        isCompleted && 'opacity-60'
       )}
     >
       <button
@@ -1141,10 +1222,10 @@ function DraggableTask({
         type="button"
         className={cn(
           'w-4 h-4 rounded border-2 flex items-center justify-center flex-shrink-0',
-          task.status === 'done' ? 'bg-green-500 border-green-500' : 'border-slate-300 hover:border-green-400'
+          isCompleted ? 'bg-green-500 border-green-500' : 'border-slate-300 hover:border-green-400'
         )}
       >
-        {task.status === 'done' && (
+        {isCompleted && (
           <svg width="9" height="9" viewBox="0 0 12 12" fill="none">
             <path d="M2 6l3 3 5-6" stroke="white" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
           </svg>
@@ -1158,7 +1239,7 @@ function DraggableTask({
       >
         <p className={cn(
           'text-xs',
-          task.status === 'done' ? 'line-through text-slate-400' : 'text-slate-700'
+          isCompleted ? 'line-through text-slate-400' : 'text-slate-700'
         )}>
           {task.title}
         </p>
@@ -1170,7 +1251,7 @@ function DraggableTask({
               <Clock size={8} />{task.estimatedMinutes}分
             </span>
           )}
-          {task.dueDate && task.status !== 'done' && (
+          {task.dueDate && !isCompleted && (
             <span className={cn(
               'text-[10px]',
               task.dueDate < todayStr ? 'text-red-500 font-medium' : 'text-slate-400'
@@ -1253,6 +1334,7 @@ interface TaskTreeDetailsProps {
   hasChildren: (taskId: string) => boolean
   isLargeTask: (task: Task) => boolean
   onToggleExpand: (taskId: string) => void
+  onToggleTaskStatus: (task: Task) => void
   onEditMinimumAction: (editing: { taskId: string; value: string } | null) => void
   onSaveMinimumAction: () => void
   onCancelMinimumAction: () => void
@@ -1261,13 +1343,14 @@ interface TaskTreeDetailsProps {
   onRequestDelete: (task: Task) => void
   onMoveTask: (task: Task, direction: 'up' | 'down') => void
   onStartDecomposition: (taskId: string) => void
+  onRegenerateMinimumAction: (taskId: string) => void
 }
 
 function TaskTreeDetails({
   task, childTasks, minimumActions, legacySteps, expandedTaskIds, decompState, editingMA,
-  hasChildren, isLargeTask, onToggleExpand, onEditMinimumAction,
+  hasChildren, isLargeTask, onToggleExpand, onToggleTaskStatus, onEditMinimumAction,
   onSaveMinimumAction, onCancelMinimumAction, onToggleStep, onEditTask, onRequestDelete, onMoveTask,
-  onStartDecomposition,
+  onStartDecomposition, onRegenerateMinimumAction,
 }: TaskTreeDetailsProps) {
   const children = childTasks[task.id] || []
   const minAction = minimumActions[task.id]
@@ -1275,6 +1358,7 @@ function TaskTreeDetails({
   const isLarge = isLargeTask(task)
 
   const showDecomposeButton = isLarge && !hasChildren(task.id) && taskState !== 'generating'
+  const showRegenerateButton = hasChildren(task.id) && taskState !== 'generating'
 
   return (
     <div className="mt-1 ml-6 p-2.5 bg-gradient-to-br from-blue-50/60 to-white rounded-lg border border-blue-100/50 space-y-2 text-xs">
@@ -1305,6 +1389,9 @@ function TaskTreeDetails({
             <button type="button" onClick={() => onEditMinimumAction({ taskId: task.id, value: minAction.description })} className="ml-1 text-slate-400 hover:text-blue-600" aria-label="编辑最小行动">
               <Edit2 size={10} />
             </button>
+            <button type="button" onClick={() => onRegenerateMinimumAction(task.id)} className="ml-1 text-slate-400 hover:text-violet-600" aria-label="重新生成最小行动" title="按当前精力重新生成">
+              <RefreshCw size={10} />
+            </button>
           </p>
           {editingMA?.taskId === task.id ? (
             <div className="flex gap-1 items-start">
@@ -1327,7 +1414,19 @@ function TaskTreeDetails({
 
       {children.length > 0 && (
         <div className="border-t border-blue-100/50 pt-2 space-y-1">
-          <p className="text-[10px] font-medium text-slate-500">阶段与小任务</p>
+          <div className="flex items-center justify-between">
+            <p className="text-[10px] font-medium text-slate-500">阶段与小任务</p>
+            {showRegenerateButton && (
+              <button
+                type="button"
+                onClick={() => onRegenerateMinimumAction(task.id)}
+                className="flex items-center gap-1 px-1.5 py-0.5 rounded text-violet-600 hover:bg-violet-50 text-[10px] font-medium transition-colors"
+                title="按当前精力重新生成所有子任务的最小行动"
+              >
+                <RefreshCw size={10} /> 重新生成最小行动
+              </button>
+            )}
+          </div>
           {children.map((child, index) => (
             <TaskTreeNode
               key={child.id}
@@ -1340,6 +1439,7 @@ function TaskTreeDetails({
               hasChildren={hasChildren}
               isLargeTask={isLargeTask}
               onToggleExpand={onToggleExpand}
+              onToggleTaskStatus={onToggleTaskStatus}
               onEditMinimumAction={onEditMinimumAction}
               onSaveMinimumAction={onSaveMinimumAction}
               onCancelMinimumAction={onCancelMinimumAction}
@@ -1347,6 +1447,7 @@ function TaskTreeDetails({
               onRequestDelete={onRequestDelete}
               onMoveTask={onMoveTask}
               onStartDecomposition={onStartDecomposition}
+              onRegenerateMinimumAction={onRegenerateMinimumAction}
               canMoveUp={index > 0}
               canMoveDown={index < children.length - 1}
             />
@@ -1373,16 +1474,30 @@ function TaskTreeDetails({
 }
 
 function TaskTreeNode(props: Omit<TaskTreeDetailsProps, 'legacySteps' | 'onToggleStep'> & { canMoveUp: boolean; canMoveDown: boolean }) {
-  const { task, expandedTaskIds, decompState, hasChildren, isLargeTask, onToggleExpand, onEditTask, onRequestDelete, onMoveTask, canMoveUp, canMoveDown } = props
+  const { task, expandedTaskIds, decompState, hasChildren, isLargeTask, onToggleExpand, onToggleTaskStatus, onEditTask, onRequestDelete, onMoveTask, canMoveUp, canMoveDown } = props
   const isExpanded = expandedTaskIds.includes(task.id)
+  const isCompleted = task.status === 'done'
 
   return (
     <div>
       <div className="flex items-center gap-1 rounded hover:bg-white/70 group">
-        <button type="button" onClick={() => onToggleExpand(task.id)} className="flex-1 flex items-center gap-2 py-1 text-left min-w-0">
+        <button type="button" onClick={() => onToggleExpand(task.id)} aria-label={`${isExpanded ? '收起' : '展开'} ${task.title}`} className="p-1 text-slate-400 hover:text-slate-600">
           <ChevronRight size={11} className={cn('text-slate-400 transition-transform', isExpanded && 'rotate-90')} />
-          <span className="w-3 h-3 rounded-full border border-slate-300 flex-shrink-0" />
-          <span className="flex-1 text-slate-700 truncate">{task.title}</span>
+        </button>
+        <button
+          type="button"
+          aria-label={`${isCompleted ? '取消完成' : '完成'} ${task.title}`}
+          aria-pressed={isCompleted}
+          onClick={() => onToggleTaskStatus(task)}
+          className={cn(
+            'w-3.5 h-3.5 rounded-full border flex items-center justify-center flex-shrink-0 transition-colors',
+            isCompleted ? 'bg-emerald-500 border-emerald-500' : 'border-slate-300 hover:border-emerald-400',
+          )}
+        >
+          {isCompleted && <svg width="7" height="7" viewBox="0 0 8 8" fill="none"><path d="M1.5 4l2 2 3-4" stroke="white" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" /></svg>}
+        </button>
+        <button type="button" onClick={() => onToggleExpand(task.id)} className="flex-1 flex items-center gap-2 py-1 text-left min-w-0">
+          <span className={cn('flex-1 truncate', isCompleted ? 'line-through text-slate-400' : 'text-slate-700')}>{task.title}</span>
           <TaskKindBadge isLarge={isLargeTask(task)} decompState={decompState[task.id]} />
         </button>
         <div className="opacity-0 group-hover:opacity-100 flex items-center text-slate-400">
@@ -1442,7 +1557,7 @@ function CompactMonth({
           </button>
         </div>
       </div>
-      <div className="grid grid-cols-7 gap-1 text-center text-[10px] text-slate-400 mb-1">
+      <div className="grid grid-cols-7 gap-1 text-center text-[11px] text-slate-400 mb-1">
         {['一', '二', '三', '四', '五', '六', '日'].map(d => (
           <div key={d} className="py-0.5">{d}</div>
         ))}
@@ -1513,10 +1628,10 @@ function MonthDayCell({
         isOver && !isSelected && 'ring-2 ring-blue-400 ring-offset-1 bg-blue-50'
       )}
     >
-      <span className="leading-none">{date.getDate()}</span>
+      <span className="leading-none text-[11px]">{date.getDate()}</span>
       {taskCount > 0 && isCurrentMonth && (
         <span className={cn(
-          'flex items-center gap-0.5 text-[8px] mt-0.5 leading-none',
+          'flex items-center gap-0.5 text-[10px] mt-0.5 leading-none',
           isSelected ? 'text-white' : isToday ? 'text-blue-600' : 'text-slate-500'
         )}>
           {allDone ? (
@@ -1552,9 +1667,10 @@ function GroupSection({
 }
 
 function DayTaskRow({
-  task, onToggle, onDelete, onUnschedule, onClick,
+  task, isCompleted, onToggle, onDelete, onUnschedule, onClick,
 }: {
   task: Task
+  isCompleted: boolean
   onToggle: () => void
   onDelete: () => void
   onUnschedule: () => void
@@ -1564,17 +1680,17 @@ function DayTaskRow({
     <div
       className={cn(
         'flex items-center gap-2 p-1.5 rounded hover:bg-slate-50 group',
-        task.status === 'done' && 'opacity-60'
+        isCompleted && 'opacity-60'
       )}
     >
       <button
         onClick={onToggle}
         className={cn(
           'w-3.5 h-3.5 rounded border flex-shrink-0 flex items-center justify-center',
-          task.status === 'done' ? 'bg-green-500 border-green-500' : 'border-slate-300'
+          isCompleted ? 'bg-green-500 border-green-500' : 'border-slate-300'
         )}
       >
-        {task.status === 'done' && (
+        {isCompleted && (
           <svg width="8" height="8" viewBox="0 0 12 12" fill="none">
             <path d="M2 6l3 3 5-6" stroke="white" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
           </svg>
@@ -1583,7 +1699,7 @@ function DayTaskRow({
       <div className="flex-1 min-w-0 cursor-pointer" onClick={onClick}>
         <p className={cn(
           'text-xs truncate',
-          task.status === 'done' ? 'line-through text-slate-400' : 'text-slate-700'
+          isCompleted ? 'line-through text-slate-400' : 'text-slate-700'
         )}>
           {task.title}
         </p>
@@ -1884,7 +2000,7 @@ function CreateTaskModal({
             {showExplain && (
               <div className="text-[10px] text-slate-500 bg-blue-50 rounded-lg p-2 mb-2 leading-relaxed">
                 <p className="font-medium mb-0.5">把重复的小事交给系统</p>
-                <p>有些事情本身并不难，但需要我们不断记住和提醒自己。把这些重复行为交给 Personal AI OS，可以减少不必要的记忆和重复决策。</p>
+                <p>有些事情本身并不难，但需要我们不断记住和提醒自己。把这些重复行为交给 Energy Action，可以减少不必要的记忆和重复决策。</p>
                 <p className="mt-1">精力等级表示这件事需要消耗多少心智或体力，<strong>不代表这件事情的重要程度</strong>。</p>
               </div>
             )}
@@ -2066,7 +2182,7 @@ function EditTaskModal({
             {showExplain && (
               <div className="text-[10px] text-slate-500 bg-blue-50 rounded-lg p-2 mb-2 leading-relaxed">
                 <p className="font-medium mb-0.5">把重复的小事交给系统</p>
-                <p>有些事情本身并不难，但需要我们不断记住和提醒自己。把这些重复行为交给 Personal AI OS，可以减少不必要的记忆和重复决策。</p>
+                <p>有些事情本身并不难，但需要我们不断记住和提醒自己。把这些重复行为交给 Energy Action，可以减少不必要的记忆和重复决策。</p>
                 <p className="mt-1">精力等级表示这件事需要消耗多少心智或体力，<strong>不代表这件事情的重要程度</strong>。</p>
               </div>
             )}

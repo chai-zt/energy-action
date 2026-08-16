@@ -110,3 +110,50 @@
 .hide-scrollbar::-webkit-scrollbar {
   display: none;
 }
+
+/* ============================================================
+   Typography Baseline v1 — 全站正式字号基线
+   经人工验收确认的字号体系，正式全局应用。
+
+   - 小字最低可读：text-[8px]→12、[9px]→12、[10px]→13、[11px]→14、text-xs→14
+   - 正文大字层级：text-sm 至 text-4xl 保持 ×1.10 后的效果
+   - 组件类：按钮、input、label = 15.4px，badge = 14px
+
+   只改 font-size；不改 line-height、spacing、padding、margin、
+   gap、尺寸、图标、图表、颜色、布局、组件结构。
+   SVG 图标（width 与 height 控制）、canvas、ECharts → 不受影响。
+
+   注：index.css 里的 .fc（FullCalendar）为死代码——项目实际使用自定义
+   CalendarPage、CalendarShared、CompactMonth，@fullcalendar 相关包是未使用
+   依赖。记为 dead code cleanup candidate，本轮不删除。
+   ============================================================ */
+
+/* 小字号 → 最低可读尺寸 */
+.text-\[8px\]  { font-size: 12px !important; } /*  8 → 12 */
+.text-\[9px\]  { font-size: 12px !important; } /*  9 → 12 */
+.text-\[10px\] { font-size: 13px !important; } /* 10 → 13 */
+.text-\[11px\] { font-size: 14px !important; } /* 11 → 14 */
+.text-xs      { font-size: 14px !important; } /* 12 → 14 */
+
+/* 正文 / 大字层级（×1.10） */
+.text-sm   { font-size: 15.4px !important; } /* 14 → 15.4 */
+.text-base { font-size: 17.6px !important; } /* 16 → 17.6 */
+.text-lg   { font-size: 19.8px !important; } /* 18 → 19.8 */
+.text-xl   { font-size: 22px   !important; } /* 20 → 22   */
+.text-2xl  { font-size: 26.4px !important; } /* 24 → 26.4 */
+.text-3xl  { font-size: 33px   !important; } /* 30 → 33   */
+.text-4xl  { font-size: 39.6px !important; } /* 36 → 39.6 */
+
+/* 组件类（@apply 内联了 text-sm / text-xs，需单独覆盖） */
+.btn-primary,
+.btn-secondary,
+.btn-ghost,
+.btn-danger,
+.input,
+.label {
+  font-size: 15.4px !important; /* text-sm 14 ×1.10 */
+}
+
+.badge {
+  font-size: 14px !important; /* text-xs 12 → 14 */
+}

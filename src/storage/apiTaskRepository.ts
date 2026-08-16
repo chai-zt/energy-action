@@ -25,8 +25,8 @@ async function migrateLegacyTasks(): Promise<void> {
 
 function ensureLegacyTasksMigrated(): Promise<void> {
   legacyMigration ??= migrateLegacyTasks().catch(error => {
-    legacyMigration = null
-    throw error
+    // ponytail: 旧 IndexedDB 只是一次性兼容来源，不能阻断 SQLite 真源。
+    console.warn('[Task migration] 已跳过不可用的旧本地数据:', error)
   })
   return legacyMigration
 }

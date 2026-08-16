@@ -311,7 +311,7 @@ export function CalendarPage() {
                           <button key={i}
                             onClick={() => handleSelectDate(d.date)}
                             className="flex-1 flex flex-col items-center gap-1 group">
-                            <span className={cn('text-[9px] transition-colors duration-150',
+                            <span className={cn('text-[10px] transition-colors duration-150',
                               d.date === currentDate ? 'text-blue-500 font-medium' :
                               d.date === todayStr ? 'text-blue-400' : 'text-slate-400 group-hover:text-slate-500')}>
                               {['一','二','三','四','五','六','日'][d.dow]}
@@ -326,7 +326,7 @@ export function CalendarPage() {
                                       : 'bg-slate-200 group-hover:bg-slate-300')}
                                 style={{ height: `${hPct}%`, minHeight: '4px', maxHeight: '48px' }} />
                             </div>
-                            <span className="text-[9px] text-slate-500 hidden group-hover:block">
+                            <span className="text-[10px] text-slate-500 hidden group-hover:block">
                               {d.count > 0 ? `${d.count}个` : '—'}
                             </span>
                           </button>
@@ -346,9 +346,9 @@ export function CalendarPage() {
                           <button key={t.id}
                             onClick={() => { if (t.plannedDate) handleSelectDate(t.plannedDate) }}
                             className="flex items-center gap-2 w-full text-left text-xs text-slate-700 py-0.5 rounded hover:bg-slate-50/50 transition-colors duration-150 group">
-                            <span className="text-[10px] font-medium text-slate-400 w-3">{i + 1}</span>
+                            <span className="text-[11px] font-medium text-slate-400 w-3">{i + 1}</span>
                             <span className="flex-1 truncate group-hover:text-slate-900">{t.title}</span>
-                            <span className={cn('text-[9px] rounded px-1',
+                            <span className={cn('text-[10px] rounded px-1',
                               t.aiPriorityLevel === 'P0' ? 'bg-red-50 text-red-500' :
                               t.aiPriorityLevel === 'P1' ? 'bg-amber-50 text-amber-500' :
                               'bg-slate-100 text-slate-500')}>{t.aiPriorityLevel || '—'}</span>
@@ -416,7 +416,7 @@ export function CalendarPage() {
                           </button>
                           <span className={cn('flex-1 truncate', task.status === 'done' && 'line-through text-slate-400')}>{task.title}</span>
                           {task.estimatedMinutes > 0 && (
-                            <span className="text-[10px] text-slate-400">{task.estimatedMinutes}分</span>
+                            <span className="text-[11px] text-slate-400">{task.estimatedMinutes}分</span>
                           )}
                           <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity duration-150">
                             <button onClick={() => handleDelete(task.id)} className="text-slate-300 hover:text-red-400"><Trash2 size={12} /></button>
